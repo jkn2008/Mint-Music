@@ -292,6 +292,19 @@ class PluginService {
       return 'https://raw.githubusercontent.com/$repoPath/$branchAndPath';
     }
 
+    // Convert Gitee blob URLs to raw content URLs
+    // https://gitee.com/{owner}/{repo}/blob/{branch}/{path}
+    // → https://gitee.com/{owner}/{repo}/raw/{branch}/{path}
+    final giteeBlobPattern = RegExp(
+      r'^https?://gitee\.com/([^/]+/[^/]+)/blob/([^?#]+)',
+    );
+    final giteeMatch = giteeBlobPattern.firstMatch(url);
+    if (giteeMatch != null) {
+      final repoPath = giteeMatch.group(1);
+      final branchAndPath = giteeMatch.group(2);
+      return 'https://gitee.com/$repoPath/raw/$branchAndPath';
+    }
+
     return url;
   }
 

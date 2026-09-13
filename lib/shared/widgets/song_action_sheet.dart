@@ -2,7 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:on_audio_query/on_audio_query.dart';
+
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_spacing.dart';
 import '../../core/theme/theme_provider.dart';
@@ -336,16 +336,14 @@ class _SongActionSheetState extends ConsumerState<SongActionSheet> {
     if (widget.song.isLocal && widget.song.mediaStoreId != null) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(AppRadius.md),
-        child: QueryArtworkWidget(
-          key: ValueKey(widget.song.mediaStoreId),
-          id: widget.song.mediaStoreId!,
-          type: ArtworkType.AUDIO,
-          keepOldArtwork: true,
-          artworkBorder: BorderRadius.zero,
-          artworkFit: BoxFit.cover,
-          size: 88,
-          quality: 100,
-          nullArtworkWidget: Container(
+        child: MusicCoverImage(
+          key: ValueKey('sas_cover_${widget.song.id}'),
+          songId: widget.song.id,
+          mediaStoreId: widget.song.mediaStoreId,
+          width: 44,
+          height: 44,
+          fit: BoxFit.cover,
+          errorWidget: Container(
             width: 44,
             height: 44,
             decoration: BoxDecoration(

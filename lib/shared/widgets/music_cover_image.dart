@@ -1,10 +1,18 @@
 import 'dart:collection';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import '../services/cover_cache_service.dart';
 
+/// 统一的封面图片组件，支持：
+/// - HTTP/HTTPS URL（网络图片）
+/// - 本地文件路径（如 /data/.../*.jpg）
+/// - 无 URL 时通过 CoverCacheService 从 MediaStore 提取（songId + mediaStoreId）
 class MusicCoverImage extends StatefulWidget {
   final String? url;
+  final String? songId;
+  final int? mediaStoreId;
   final double? width;
   final double? height;
   final BoxFit fit;
@@ -18,6 +26,8 @@ class MusicCoverImage extends StatefulWidget {
   const MusicCoverImage({
     super.key,
     this.url,
+    this.songId,
+    this.mediaStoreId,
     this.width,
     this.height,
     this.fit = BoxFit.cover,
@@ -34,8 +44,6 @@ class MusicCoverImage extends StatefulWidget {
 }
 
 class _MusicCoverImageState extends State<MusicCoverImage> {
-  // Keep the decoded image cache bounded by bytes. A count-only limit can
-  // retain hundreds of large covers on low-memory devices.
   static final LinkedHashMap<String, Uint8List> _cache = LinkedHashMap();
   static final Map<String, List<void Function(Uint8List)>> _pending = {};
   static const int _maxCacheBytes = 24 * 1024 * 1024;
@@ -61,7 +69,7 @@ class _MusicCoverImageState extends State<MusicCoverImage> {
 
   Uint8List? _bytes;
   bool _loading = true;
-  String? _lastUrl;
+  String? _lastKey;
 
   @override
   void initState() {
@@ -72,40 +80,44 @@ class _MusicCoverImageState extends State<MusicCoverImage> {
   @override
   void didUpdateWidget(MusicCoverImage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.url != widget.url) {
+    if (oldWidget.url != widget.url ||
+        oldWidget.songId != widget.songId ||
+        oldWidget.mediaStoreId != widget.mediaStoreId) {
       _load();
     }
   }
 
   void _load() {
     final url = widget.url;
+
+    // Case 1: 无 URL — 从 CoverCacheService 获取（MediaStore 提取）
     if (url == null || url.isEmpty) {
-      setState(() {
-        _loading = false;
-        _bytes = null;
-      });
+      if (widget.songId != null && widget.mediaStoreId != null) {
+        _loadFromCoverCache();
+      } else {
+        setState(() {
+          _loading = false;
+          _bytes = null;
+        });
+      }
       return;
     }
 
-    var imageUrl = url;
-    final needsReferer = imageUrl.contains('music.126.net');
-    if (needsReferer && imageUrl.startsWith('http://')) {
-      imageUrl = 'https://${imageUrl.substring(7)}';
-    }
-    // Kuwo CDN 在某些 Android 设备上 HTTPS 证书不匹配，降级为 HTTP
-    if ((imageUrl.contains('kwcdn.kuwo.cn') ||
-            imageUrl.contains('kuwo.cn') ||
-            imageUrl.contains('img1.kuwo.cn')) &&
-        imageUrl.startsWith('https://')) {
-      imageUrl = 'http://${imageUrl.substring(8)}';
-    }
+    // Case 2: 有 URL — 根据类型加载本地文件或网络图片
+    final cacheKey = url;
 
-    if (_lastUrl == imageUrl && _bytes != null) return;
-    _lastUrl = imageUrl;
+    if (_lastKey == cacheKey && _bytes != null) {
+      setState(() {
+        _loading = false;
+      });
+      return;
+    }
+    _lastKey = cacheKey;
 
-    final cached = _cache.remove(imageUrl);
+    // 内存缓存命中
+    final cached = _cache.remove(cacheKey);
     if (cached != null) {
-      _cache[imageUrl] = cached;
+      _cache[cacheKey] = cached;
       setState(() {
         _bytes = cached;
         _loading = false;
@@ -113,9 +125,10 @@ class _MusicCoverImageState extends State<MusicCoverImage> {
       return;
     }
 
-    if (_pending.containsKey(imageUrl)) {
-      _pending[imageUrl]!.add((bytes) {
-        if (mounted && _lastUrl == imageUrl) {
+    // 正在加载中，加入等待队列
+    if (_pending.containsKey(cacheKey)) {
+      _pending[cacheKey]!.add((bytes) {
+        if (mounted && _lastKey == cacheKey) {
           setState(() {
             _bytes = bytes;
             _loading = false;
@@ -125,17 +138,129 @@ class _MusicCoverImageState extends State<MusicCoverImage> {
       return;
     }
 
-    _pending[imageUrl] = [];
+    _pending[cacheKey] = [];
     _loading = true;
 
-    _fetchImage(imageUrl, needsReferer);
+    // 本地文件路径
+    if (_isLocalPath(url)) {
+      _readLocalFile(url, cacheKey);
+      return;
+    }
+
+    // 网络 URL
+    _fetchImage(url, cacheKey);
   }
 
-  Future<void> _fetchImage(String imageUrl, bool needsReferer) async {
+  bool _isLocalPath(String path) {
+    return path.startsWith('/') ||
+        path.startsWith('\\\\') ||
+        path.startsWith('file://');
+  }
+
+  Future<void> _readLocalFile(String path, String cacheKey) async {
+    try {
+      String filePath = path;
+      if (filePath.startsWith('file://')) {
+        filePath = filePath.substring(7);
+      }
+      final file = File(filePath);
+      if (await file.exists()) {
+        final bytes = await file.readAsBytes();
+        if (bytes.isNotEmpty) {
+          _putCache(cacheKey, bytes);
+          if (mounted && _lastKey == cacheKey) {
+            setState(() {
+              _bytes = bytes;
+              _loading = false;
+            });
+          }
+          _notifyPending(cacheKey, bytes);
+          return;
+        }
+      }
+    } catch (e) {
+      debugPrint('[MusicCoverImage] 本地文件读取失败: $path - $e');
+    }
+    _onError(cacheKey);
+  }
+
+  void _loadFromCoverCache() {
+    final songId = widget.songId!;
+    final mediaStoreId = widget.mediaStoreId;
+
+    if (_lastKey == songId && _bytes != null) {
+      setState(() {
+        _loading = false;
+      });
+      return;
+    }
+    _lastKey = songId;
+
+    _loading = true;
+
+    // 异步从 CoverCacheService 获取
+    _fetchFromCoverCache(songId, mediaStoreId);
+  }
+
+  Future<void> _fetchFromCoverCache(
+      String songId, int? mediaStoreId) async {
+    try {
+      final cache = CoverCacheService();
+      final bytes = await cache.getArtwork(songId, mediaStoreId: mediaStoreId);
+
+      if (bytes != null && bytes.isNotEmpty) {
+        _putCache(songId, bytes);
+        if (mounted && _lastKey == songId) {
+          setState(() {
+            _bytes = bytes;
+            _loading = false;
+          });
+        }
+        _notifyPending(songId, bytes);
+        return;
+      }
+    } catch (e) {
+      debugPrint('[MusicCoverImage] CoverCache 加载失败: $songId - $e');
+    }
+    _onError(songId);
+  }
+
+  void _putCache(String key, Uint8List bytes) {
+    if (bytes.length > _maxCacheBytes) return;
+    while (_cacheBytes + bytes.length > _maxCacheBytes && _cache.isNotEmpty) {
+      final oldestKey = _cache.keys.first;
+      final oldest = _cache.remove(oldestKey);
+      if (oldest != null) _cacheBytes -= oldest.length;
+    }
+    _cache[key] = bytes;
+    _cacheBytes += bytes.length;
+  }
+
+  void _notifyPending(String key, Uint8List bytes) {
+    final callbacks = _pending.remove(key);
+    if (callbacks != null) {
+      for (final cb in callbacks) {
+        cb(bytes);
+      }
+    }
+  }
+
+  Future<void> _fetchImage(String imageUrl, String cacheKey) async {
+    // URL 处理：Referer 头、CDN 降级
+    var needsReferer = imageUrl.contains('music.126.net');
+    if (needsReferer && imageUrl.startsWith('http://')) {
+      imageUrl = 'https://${imageUrl.substring(7)}';
+    }
+    if ((imageUrl.contains('kwcdn.kuwo.cn') ||
+            imageUrl.contains('kuwo.cn') ||
+            imageUrl.contains('img1.kuwo.cn')) &&
+        imageUrl.startsWith('https://')) {
+      imageUrl = 'http://${imageUrl.substring(8)}';
+    }
+
     try {
       final dio = needsReferer ? _refererDio : _dio;
       final options = Options(responseType: ResponseType.bytes);
-      // 网易云 CDN 需要 Referer 头
       if (needsReferer) {
         options.headers = {'Referer': 'https://music.163.com'};
       }
@@ -146,45 +271,30 @@ class _MusicCoverImageState extends State<MusicCoverImage> {
       );
 
       if (response.data == null) {
-        _onError(imageUrl);
+        _onError(cacheKey);
         return;
       }
 
       final bytes = Uint8List.fromList(response.data!);
 
-      // 某些 CDN 返回 0 字节或极小的错误响应（如 HTML 错误页）
       if (bytes.length < 100) {
-        debugPrint('[MusicCoverImage] 响应过小 (${bytes.length} bytes)，可能不是图片: $imageUrl');
-        _onError(imageUrl);
+        debugPrint(
+            '[MusicCoverImage] 响应过小 (${bytes.length} bytes)，可能不是图片: $imageUrl');
+        _onError(cacheKey);
         return;
       }
 
-      if (bytes.length <= _maxCacheBytes) {
-        while (_cacheBytes + bytes.length > _maxCacheBytes &&
-            _cache.isNotEmpty) {
-          final oldestKey = _cache.keys.first;
-          final oldest = _cache.remove(oldestKey);
-          if (oldest != null) _cacheBytes -= oldest.length;
-        }
-        _cache[imageUrl] = bytes;
-        _cacheBytes += bytes.length;
-      }
+      _putCache(cacheKey, bytes);
 
-      if (mounted && _lastUrl == imageUrl) {
+      if (mounted && _lastKey == cacheKey) {
         setState(() {
           _bytes = bytes;
           _loading = false;
         });
       }
 
-      final callbacks = _pending.remove(imageUrl);
-      if (callbacks != null) {
-        for (final cb in callbacks) {
-          cb(bytes);
-        }
-      }
+      _notifyPending(cacheKey, bytes);
     } catch (e) {
-      // 首次失败时带 User-Agent 重试一次（部分 CDN 需要这些头）
       if (!needsReferer) {
         try {
           debugPrint('[MusicCoverImage] 首次加载失败，带 User-Agent 重试: $imageUrl');
@@ -194,40 +304,26 @@ class _MusicCoverImageState extends State<MusicCoverImage> {
           );
           if (response.data != null && response.data!.length >= 100) {
             final bytes = Uint8List.fromList(response.data!);
-            if (bytes.length <= _maxCacheBytes) {
-              while (_cacheBytes + bytes.length > _maxCacheBytes &&
-                  _cache.isNotEmpty) {
-                final oldestKey = _cache.keys.first;
-                final oldest = _cache.remove(oldestKey);
-                if (oldest != null) _cacheBytes -= oldest.length;
-              }
-              _cache[imageUrl] = bytes;
-              _cacheBytes += bytes.length;
-            }
-            if (mounted && _lastUrl == imageUrl) {
+            _putCache(cacheKey, bytes);
+            if (mounted && _lastKey == cacheKey) {
               setState(() {
                 _bytes = bytes;
                 _loading = false;
               });
             }
-            final callbacks = _pending.remove(imageUrl);
-            if (callbacks != null) {
-              for (final cb in callbacks) {
-                cb(bytes);
-              }
-            }
+            _notifyPending(cacheKey, bytes);
             return;
           }
         } catch (_) {}
       }
       debugPrint('[MusicCoverImage] 加载失败: $imageUrl - $e');
-      _onError(imageUrl);
+      _onError(cacheKey);
     }
   }
 
-  void _onError(String imageUrl) {
-    _pending.remove(imageUrl);
-    if (mounted && _lastUrl == imageUrl) {
+  void _onError(String cacheKey) {
+    _pending.remove(cacheKey);
+    if (mounted && _lastKey == cacheKey) {
       setState(() {
         _loading = false;
       });
@@ -236,9 +332,6 @@ class _MusicCoverImageState extends State<MusicCoverImage> {
 
   @override
   Widget build(BuildContext context) {
-    // Keep drawing the previous decoded cover while a new song's cover is
-    // downloading. Replacing it with a placeholder for one or two frames is
-    // especially visible in the full-player background during next/previous.
     if (_loading && _bytes == null) {
       return widget.errorWidget ?? _buildPlaceholder();
     }
@@ -267,9 +360,6 @@ class _MusicCoverImageState extends State<MusicCoverImage> {
 
   static int _decodeDimension(double? dimension) {
     if (dimension == null || !dimension.isFinite || dimension <= 0) {
-      // Most callers are cards and list rows. Full-player artwork supplies
-      // an explicit cache size, so decoding every unspecified cover at 1024px
-      // only wastes memory and makes scrolling stutter on low-end devices.
       return 512;
     }
     return (dimension * 2).round().clamp(64, 1024);

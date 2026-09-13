@@ -296,6 +296,7 @@ class PluginRepository {
           available: true,
           remoteVersion: remoteVersion,
           remoteCode: code,
+          updateUrl: url,
         );
       }
     } catch (e) {
@@ -369,11 +370,13 @@ class PluginUpdateResult {
   final bool available;
   final String? remoteVersion;
   final String? remoteCode;
+  final String? updateUrl;
 
   const PluginUpdateResult({
     required this.plugin,
     required this.available,
     this.remoteVersion,
     this.remoteCode,
+    this.updateUrl,
   });
 }

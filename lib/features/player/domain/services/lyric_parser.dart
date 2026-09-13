@@ -4,6 +4,92 @@ import 'package:flutter/foundation.dart';
 import '../models/lyric_line.dart';
 import 'ttml_parser.dart';
 
+/// 行内 LRC 时间标签（宽松匹配：秒/毫秒 1~3 位、支持全角括号）。
+/// 如 `[02:13.20]`、`[2:13.2]`、`［02:13.20］`。
+final RegExp _lrcInlineTagRegExp = RegExp(
+  r'[\[\［]\d{1,2}:\d{1,2}(?:[.:]\d{1,3})?[\]\］]',
+);
+
+/// 交错式逐字标签（带捕获组，用于解析词级时间轴）。
+final RegExp _interleavedTagRegExp = RegExp(
+  r'[\[\［](\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?[\]\］]',
+);
+
+/// 解析"交错式"逐字时间标签行：
+/// - `[00:12.00]我[00:12.30]感[00:13.00]觉`（行首标签后文字带标签）
+/// - `我[02:13.20]感[02:13.64]觉[02:14.53]`（首段无标签，用 [lineStartMs]）
+/// 返回 null 表示不是交错式格式。
+/// 解析"交错式"逐字时间标签行（词后置时间戳）：
+/// - `[00:12.00]我[00:12.30]感[00:13.00]觉`
+/// - `我[02:13.20]感[02:13.64]觉[02:14.53]`（首段无标签，[lineStartMs] 传 -1）
+/// 每个标签属于其前面紧邻的文本段。返回 null 表示不是交错式格式。
+List<LyricWord>? _parseInterleavedWords(String content, int lineStartMs) {
+  final matches = _interleavedTagRegExp.allMatches(content).toList();
+  if (matches.isEmpty) return null;
+
+  final words = <LyricWord>[];
+  var pos = 0;
+  for (var i = 0; i < matches.length; i++) {
+    final m = matches[i];
+    final text = content.substring(pos, m.start).trim();
+    if (text.isNotEmpty) {
+      var tagMs = _parseInterleavedTagMs(m);
+      // 标签时间小于行起始时视为相对偏移
+      if (tagMs < lineStartMs) tagMs += lineStartMs;
+      // 首段文字（第一个标签前）：有行首时间戳用行起始时间，
+      // 无行首时间戳（补偿解析，lineStartMs=-1）用第一个标签时间。
+      final startMs = i == 0 && lineStartMs >= 0 ? lineStartMs : tagMs;
+      final endMs = i < matches.length - 1
+          ? _parseInterleavedTagMs(matches[i + 1])
+          : tagMs + 500;
+      words.add(
+        LyricWord(word: text, startTimeMs: startMs, endTimeMs: endMs),
+      );
+    }
+    pos = m.end;
+  }
+
+  // 最后一个标签之后的残留文本：独立成词（时间取最后标签），
+  // 避免与前一词合并丢失词级信息。
+  final tail = content.substring(pos).trim();
+  if (tail.isNotEmpty) {
+    if (words.isNotEmpty) {
+      final lastTagMs = _parseInterleavedTagMs(matches.last);
+      words.add(
+        LyricWord(word: tail, startTimeMs: lastTagMs, endTimeMs: lastTagMs + 500),
+      );
+    } else {
+      words.add(
+        LyricWord(word: tail, startTimeMs: lineStartMs, endTimeMs: lineStartMs),
+      );
+    }
+  }
+
+  if (words.isEmpty) return null;
+  return words;
+}
+
+int _parseInterleavedTagMs(Match m) {
+  final minutes = int.parse(m.group(1)!);
+  final seconds = int.parse(m.group(2)!);
+  var msStr = m.group(3) ?? '0';
+  if (msStr.length == 2) msStr = '${msStr}0';
+  if (msStr.length > 3) msStr = msStr.substring(0, 3);
+  return minutes * 60000 + seconds * 1000 + int.parse(msStr);
+}
+
+/// 剥离行内 LRC 时间标签，避免标签以文本形式显示。
+String _stripInlineLrcTags(String text) =>
+    text.replaceAll(_lrcInlineTagRegExp, '').trim();
+
+/// 剥离各类词级标记（`(ms,dur)`、`<rel,dur>`、内联 `[mm:ss.xx]`），
+/// 用于各格式解析器"无词标签回退"分支，避免标签以文本形式显示。
+String _stripWordTags(String text) => text
+    .replaceAll(RegExp(r'[(（]\d+[,，]\d+(?:[,，]\d+)?[)）]'), '')
+    .replaceAll(RegExp(r'<\d+(?:,\d+)+>'), '')
+    .replaceAll(_lrcInlineTagRegExp, '')
+    .trim();
+
 List<LyricLine> parseLrc(String lrcText, {String? tlyric, String? rlyric}) {
   if (lrcText.isEmpty) return [];
 
@@ -25,7 +111,21 @@ List<LyricLine> parseLrc(String lrcText, {String? tlyric, String? rlyric}) {
     }
 
     final match = lineRegExp.firstMatch(trimmed);
-    if (match == null) continue;
+    if (match == null) {
+      // 无行首时间戳但含交错式标签的行（`我[02:13.20]感[02:13.64]`）：
+      // 补偿解析为词级时间轴，避免整行丢弃或标签以文本显示。
+      final interWords = _parseInterleavedWords(trimmed, -1);
+      if (interWords != null) {
+        lines.add(
+          _RawLrcLine(
+            timestampMs: interWords.first.startTimeMs,
+            text: interWords.map((w) => w.word).join(),
+            words: interWords,
+          ),
+        );
+      }
+      continue;
+    }
 
     final minutes = int.parse(match.group(1)!);
     final seconds = int.parse(match.group(2)!);
@@ -33,14 +133,28 @@ List<LyricLine> parseLrc(String lrcText, {String? tlyric, String? rlyric}) {
     if (msStr.length == 2) msStr = '${msStr}0';
     final ms = int.parse(msStr);
     var text = match.group(4)?.trim() ?? '';
+    final timestampMs = minutes * 60000 + seconds * 1000 + ms + globalOffset;
+
+    // 交错式逐字标签（`[00:12.00]我[00:12.30]感[00:13.00]觉`）：
+    // 解析为词级时间轴，标签不再作为文本显示。
+    final interWords = _parseInterleavedWords(text, timestampMs);
+    if (interWords != null) {
+      lines.add(
+        _RawLrcLine(
+          timestampMs: timestampMs,
+          text: interWords.map((w) => w.word).join(),
+          words: interWords,
+        ),
+      );
+      continue;
+    }
 
     text = text.replaceAll(wordTagRegExp, '');
     // 去掉所有内嵌的 LRC 时间标签（形如 `[00:00.47]`），避免污染歌词文本
     // 这些标签可能出现在歌词文本的任意位置（行首、中间、行尾）
-    text = text.replaceAll(RegExp(r'\[\d{1,2}:\d{2}(?:\.\d{2,3})?\]'), '');
+    text = text.replaceAll(_lrcInlineTagRegExp, '');
     if (text.isEmpty) continue;
 
-    final timestampMs = minutes * 60000 + seconds * 1000 + ms + globalOffset;
     lines.add(_RawLrcLine(timestampMs: timestampMs, text: text));
   }
 
@@ -58,6 +172,19 @@ List<LyricLine> parseLrc(String lrcText, {String? tlyric, String? rlyric}) {
 
     final translation = _findTranslation(tlyricMap, line.timestampMs);
     final roman = _findTranslation(rlyricMap, line.timestampMs);
+
+    if (line.words != null) {
+      result.add(
+        LyricLine(
+          startTimeMs: line.timestampMs,
+          endTimeMs: endTimeMs,
+          words: line.words!,
+          translatedLyric: translation,
+          romanLyric: roman,
+        ),
+      );
+      continue;
+    }
 
     result.add(
       LyricLine(
@@ -82,7 +209,8 @@ List<LyricLine> parseLrc(String lrcText, {String? tlyric, String? rlyric}) {
 class _RawLrcLine {
   final int timestampMs;
   final String text;
-  const _RawLrcLine({required this.timestampMs, required this.text});
+  final List<LyricWord>? words;
+  const _RawLrcLine({required this.timestampMs, required this.text, this.words});
 }
 
 /// Remove timed word tags like `(37196,207)` or `（37196，207）`
@@ -169,9 +297,12 @@ List<LyricLine> parseYrc(String yrcText) {
       wordBeforeTag: !content.startsWith('('),
     );
     if (words.isEmpty && content.isNotEmpty) {
-      words.add(
-        LyricWord(word: content, startTimeMs: startTime, endTimeMs: endTime),
-      );
+      final cleaned = _stripWordTags(content);
+      if (cleaned.isNotEmpty) {
+        words.add(
+          LyricWord(word: cleaned, startTimeMs: startTime, endTimeMs: endTime),
+        );
+      }
     }
     if (words.isEmpty) continue;
     final resolvedEndTime = duration > 0
@@ -223,9 +354,12 @@ List<LyricLine> parseQrc(String qrcText) {
     );
 
     if (words.isEmpty && content.isNotEmpty) {
-      words.add(
-        LyricWord(word: content, startTimeMs: startTime, endTimeMs: endTime),
-      );
+      final cleaned = _stripWordTags(content);
+      if (cleaned.isNotEmpty) {
+        words.add(
+          LyricWord(word: cleaned, startTimeMs: startTime, endTimeMs: endTime),
+        );
+      }
     }
 
     if (words.isNotEmpty) {
@@ -279,9 +413,12 @@ List<LyricLine> parseKrc(String krcText) {
     );
 
     if (words.isEmpty && content.isNotEmpty) {
-      words.add(
-        LyricWord(word: content, startTimeMs: startTime, endTimeMs: endTime),
-      );
+      final cleaned = _stripWordTags(content);
+      if (cleaned.isNotEmpty) {
+        words.add(
+          LyricWord(word: cleaned, startTimeMs: startTime, endTimeMs: endTime),
+        );
+      }
     }
 
     if (words.isNotEmpty) {
@@ -323,9 +460,12 @@ List<LyricLine> parseMrc(String mrcText) {
     );
 
     if (words.isEmpty && content.isNotEmpty) {
-      words.add(
-        LyricWord(word: content, startTimeMs: startTime, endTimeMs: endTime),
-      );
+      final cleaned = _stripWordTags(content);
+      if (cleaned.isNotEmpty) {
+        words.add(
+          LyricWord(word: cleaned, startTimeMs: startTime, endTimeMs: endTime),
+        );
+      }
     }
 
     if (words.isNotEmpty) {
@@ -795,7 +935,7 @@ List<LyricLine> parseLrcx(String lrcxText) {
     }
 
     if (words.isEmpty && content.isNotEmpty) {
-      final cleanContent = content.replaceAll(wordTimeExp, '');
+      final cleanContent = _stripWordTags(content);
       if (cleanContent.isNotEmpty) {
         words.add(
           LyricWord(

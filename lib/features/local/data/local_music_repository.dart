@@ -63,11 +63,13 @@ class LocalMusicRepository {
 
   final Set<String> _scannedDirs = {};
   final Map<String, Song> _songsMap = {};
+  bool _initialized = false;
   bool _isScanning = false;
   ScanProgressCallback? onScanProgress;
   BatchMatchProgressCallback? onBatchMatchProgress;
 
   Future<void> init() async {
+    if (_initialized) return;
     final prefs = await SharedPreferences.getInstance();
     final dirsJson = prefs.getStringList(_dirsKey) ?? [];
     _scannedDirs.addAll(dirsJson);
@@ -80,6 +82,7 @@ class LocalMusicRepository {
         _songsMap[song.id] = song;
       }
     }
+    _initialized = true;
   }
 
   List<Song> getLocalSongs() {
@@ -141,12 +144,14 @@ class LocalMusicRepository {
   }
 
   Future<void> addDirectory(String dirPath) async {
+    await init();
     if (_scannedDirs.contains(dirPath)) return;
     _scannedDirs.add(dirPath);
     await _saveIndex();
   }
 
   Future<void> removeDirectory(String dirPath) async {
+    await init();
     _scannedDirs.remove(dirPath);
     final normalized = dirPath.replaceAll('\\', '/');
     _songsMap.removeWhere((_, s) {
@@ -157,6 +162,7 @@ class LocalMusicRepository {
   }
 
   Future<void> setDirectories(List<String> dirs) async {
+    await init();
     _scannedDirs.clear();
     _scannedDirs.addAll(dirs.where((d) => d.isNotEmpty));
     await _saveDirs();
@@ -172,6 +178,7 @@ class LocalMusicRepository {
 
   Future<void> scanAll({ScanProgressCallback? onProgress}) async {
     if (_isScanning) return;
+    await init();
     _isScanning = true;
 
     try {
@@ -279,7 +286,7 @@ class LocalMusicRepository {
         mediaStoreId,
         ArtworkType.AUDIO,
         quality: 100,
-        size: 400,
+        size: 1024,
       );
     } catch (_) {
       return null;
@@ -287,6 +294,7 @@ class LocalMusicRepository {
   }
 
   Future<void> clearIndex() async {
+    await init();
     _songsMap.clear();
     await _saveIndex();
   }
@@ -294,6 +302,7 @@ class LocalMusicRepository {
   /// [forceOverwrite] 为 true 时直接覆盖所有字段（用于精准匹配等用户主动操作），
   /// 为 false 时使用合并策略保留已有非空值（用于批量匹配等自动操作）。
   Future<void> upsertSong(Song song, {bool forceOverwrite = false}) async {
+    await init();
     if (forceOverwrite) {
       _songsMap[song.id] = song;
     } else {
@@ -310,6 +319,7 @@ class LocalMusicRepository {
   /// 从本地音乐库删除歌曲，并尽力删除磁盘上的音频文件。
   /// 磁盘文件删除失败（如权限不足）不影响索引移除，返回是否成功从索引移除。
   Future<bool> deleteSong(String id) async {
+    await init();
     final song = _songsMap[id];
     if (song == null) return false;
     _songsMap.remove(id);

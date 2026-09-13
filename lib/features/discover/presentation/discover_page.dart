@@ -855,6 +855,9 @@ class _DiscoverPageState extends ConsumerState<DiscoverPage> {
                     child: MusicCoverImage(
                       url: playlist.coverUrl,
                       fit: BoxFit.cover,
+                      cacheWidth: 400,
+                      cacheHeight: 400,
+                      filterQuality: FilterQuality.high,
                       errorWidget: Icon(
                         Icons.music_note,
                         size: 40,

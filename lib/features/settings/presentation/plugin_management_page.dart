@@ -210,12 +210,15 @@ class _PluginManagementPageState extends ConsumerState<PluginManagementPage> {
 
   void _showPendingPluginUpdateNotices() {
     // Retrieve buffered notices that arrived during plugin initialization
-    // (before this page was opened). The buffer persists so repeated
-    // opens of the page still show the update notification.
+    // (before this page was opened). After showing, clear the buffer so
+    // the dialog is only shown once per app session — repeated opens of
+    // the page won't re-trigger the update alert.
     final pluginService = ref.read(pluginServiceProvider);
     final pending = pluginService.getBufferedUpdateNotices();
     if (pending.isEmpty) return;
     debugPrint('[PluginManagementPage] Showing ${pending.length} buffered update notices');
+    // Clear buffer immediately to prevent re-showing on subsequent visits.
+    pluginService.clearAllBufferedUpdateNotices();
     // Show dialogs sequentially with a small delay between each.
     for (final notice in pending) {
       final pluginName = notice['pluginName'] as String? ?? tr('未知插件');
@@ -272,12 +275,19 @@ class _PluginManagementPageState extends ConsumerState<PluginManagementPage> {
           ?.where((p) => p.id == pluginId)
           .firstOrNull;
       if (pluginInfo != null && log.isNotEmpty) {
-        mergedResults.add(PluginUpdateResult(
-          plugin: pluginInfo,
-          available: true,
-          remoteVersion: pluginVersion.isNotEmpty ? pluginVersion : 'latest',
-          remoteCode: log,
-        ));
+        // Use updateUrl from the script notice if available, fallback to plugin's stored URL.
+        final effectiveUpdateUrl = updateUrl?.isNotEmpty == true
+            ? updateUrl
+            : pluginInfo.updateUrl;
+        if (effectiveUpdateUrl != null && effectiveUpdateUrl.isNotEmpty) {
+          mergedResults.add(PluginUpdateResult(
+            plugin: pluginInfo,
+            available: true,
+            remoteVersion: pluginVersion.isNotEmpty ? pluginVersion : 'latest',
+            remoteCode: log,
+            updateUrl: effectiveUpdateUrl,
+          ));
+        }
       }
     }
 
@@ -930,10 +940,17 @@ class _PluginManagementPageState extends ConsumerState<PluginManagementPage> {
       // Determine plugin type from the updateUrl or the existing plugin
       final type = result.plugin.type;
 
-      // Download and install the new version from the updateUrl
+      // Download and install the new version from the updateUrl.
+      // Use result.updateUrl (from script notice or manual check) first,
+      // fallback to plugin.updateUrl.
+      final downloadUrl = result.updateUrl ?? result.plugin.updateUrl;
+      if (downloadUrl == null || downloadUrl.isEmpty) {
+        throw Exception(context.tr('无法获取插件更新地址'));
+      }
+
       final pluginService = ref.read(pluginServiceProvider);
       final newPlugin = await pluginService.downloadAndAddPlugin(
-        result.plugin.updateUrl!,
+        downloadUrl,
         type,
       );
 
@@ -943,6 +960,14 @@ class _PluginManagementPageState extends ConsumerState<PluginManagementPage> {
       // Clear buffered update notice for this plugin so it doesn't
       // show again after the page is reopened.
       ref.read(pluginServiceProvider).clearBufferedUpdateNotice(result.plugin.id);
+
+      // Also clear the script-initiated update notice so the UI
+      // stops showing the update badge after the plugin is updated.
+      final currentNotices = ref.read(pluginScriptUpdateNoticesProvider);
+      final updatedNotices = currentNotices
+          .where((n) => n['pluginId'] != result.plugin.id)
+          .toList();
+      ref.read(pluginScriptUpdateNoticesProvider.notifier).state = updatedNotices;
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

@@ -165,7 +165,7 @@ class QQMusicSource implements MusicSourceProvider {
               String coverUrl = '';
               if (albumMid.isNotEmpty) {
                 coverUrl =
-                    'https://y.gtimg.cn/music/photo_new/T002R300x300M000$albumMid.jpg';
+'https://y.gtimg.cn/music/photo_new/T002R800x800M000$albumMid.jpg';
               } else if (singerMid.isNotEmpty) {
                 coverUrl =
                     'https://y.gtimg.cn/music/photo_new/T001R300x300M000$singerMid.jpg';
@@ -1979,12 +1979,10 @@ class QQMusicSource implements MusicSourceProvider {
 
   @override
   Future<String?> getCoverUrl(String songId) async {
-    try {
-      final cleanId = songId.replaceAll('tx_', '');
-      return 'https://y.gtimg.cn/music/photo_new/T002R300x300M000$cleanId.jpg';
-    } catch (e) {
-      return null;
-    }
+    // TX 源的封面 URL 需要 albumMid，但这里只有 songMid
+    // 返回 null 让系统使用歌曲加载时已有的封面 URL
+    // 这与 CeruMusic 的行为一致：封面在搜索/歌单加载时就已确定
+    return null;
   }
 
   @override
@@ -2146,7 +2144,9 @@ class QQMusicSource implements MusicSourceProvider {
                 _readMapString(basic['cover'], 'medium_url') ??
                 _readMapString(basic['cover'], 'default_url') ??
                 '',
-            songCount: 0,
+            songCount: _parseSongCount(
+              basic['song_cnt'] ?? basic['song_ids'] ?? basic['song_num'],
+            ),
             playCount: _formatPlayCount(basic['play_cnt']),
             author: _readMapString(basic['creator'], 'nick') ?? '',
             source: 'tx',
@@ -2279,7 +2279,7 @@ class QQMusicSource implements MusicSourceProvider {
               : '',
           duration: _parseInt(item['interval']),
           coverUrl: item['album'] is Map && item['album']['mid'] != null
-              ? 'https://y.gtimg.cn/music/photo_new/T002R300x300M000${item['album']['mid']}.jpg'
+              ? 'https://y.gtimg.cn/music/photo_new/T002R800x800M000${item['album']['mid']}.jpg'
               : '',
           source: 'tx',
           lyricUrl: item['id']?.toString(),
@@ -2562,7 +2562,7 @@ class QQMusicSource implements MusicSourceProvider {
                 ? item['songname'].toString()
                 : item['title']?.toString() ?? item['name']?.toString() ?? '';
             final coverUrl = albumMid.isNotEmpty
-                ? 'https://y.gtimg.cn/music/photo_new/T002R500x500M000$albumMid.jpg'
+                ? 'https://y.gtimg.cn/music/photo_new/T002R800x800M000$albumMid.jpg'
                 : singerMid.isNotEmpty
                 ? 'https://y.gtimg.cn/music/photo_new/T001R500x500M000$singerMid.jpg'
                 : '';
@@ -2593,7 +2593,7 @@ class QQMusicSource implements MusicSourceProvider {
     // Try album mid first
     final albumMid = item['album']?['mid']?.toString();
     if (albumMid != null && albumMid.isNotEmpty) {
-      return 'https://y.gtimg.cn/music/photo_new/T002R300x300M000$albumMid.jpg';
+      return 'https://y.gtimg.cn/music/photo_new/T002R800x800M000$albumMid.jpg';
     }
 
     // Try singer mid as fallback

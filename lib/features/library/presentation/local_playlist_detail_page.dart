@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:on_audio_query/on_audio_query.dart';
+
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../../core/l10n/l10n.dart';
@@ -44,6 +44,13 @@ class _LocalPlaylistDetailPageState
   List<Song> _sortedSongs = [];
   List<Song> _originalSongs = [];
   bool _isCustomSortMode = false;
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   List<Song> _applySort(List<Song> songs) {
     final list = List<Song>.from(songs);
@@ -553,15 +560,13 @@ class _LocalPlaylistDetailPageState
     if (firstSong.mediaStoreId != null) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        child: QueryArtworkWidget(
-          key: ValueKey(firstSong.mediaStoreId),
-          id: firstSong.mediaStoreId!,
-          type: ArtworkType.AUDIO,
-          nullArtworkWidget:
+        child: MusicCoverImage(
+          key: ValueKey('lp_cover_${firstSong.id}'),
+          songId: firstSong.id,
+          mediaStoreId: firstSong.mediaStoreId,
+          fit: BoxFit.cover,
+          errorWidget:
               Icon(Icons.music_note, size: 40, color: colors.textHint),
-          keepOldArtwork: true,
-          artworkBorder: BorderRadius.circular(AppRadius.lg),
-          artworkFit: BoxFit.cover,
         ),
       );
     }
@@ -586,14 +591,13 @@ class _LocalPlaylistDetailPageState
     if (song.mediaStoreId != null) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(AppRadius.sm),
-        child: QueryArtworkWidget(
-          id: song.mediaStoreId as int,
-          type: ArtworkType.AUDIO,
-          nullArtworkWidget:
+        child: MusicCoverImage(
+          key: ValueKey('lps_cover_${song.id}'),
+          songId: song.id,
+          mediaStoreId: song.mediaStoreId,
+          fit: BoxFit.cover,
+          errorWidget:
               Icon(Icons.music_note, size: 20, color: colors.primary),
-          keepOldArtwork: true,
-          artworkBorder: BorderRadius.circular(AppRadius.sm),
-          artworkFit: BoxFit.cover,
         ),
       );
     }
@@ -747,13 +751,16 @@ class _LocalPlaylistDetailPageState
       );
     }
 
-    return ListView.builder(
-      // 预留迷你播放器高度（56px + 底部 20px 间距），保证最后一首歌曲
-      // 能滚动到迷你播放器上方而不被遮挡。
-      padding: const EdgeInsets.only(
-        bottom: AppSpacing.miniPlayerHeight + AppSpacing.lg,
-      ),
-      itemCount: _sortedSongs.length,
+    return Stack(
+      children: [
+        ListView.builder(
+          controller: _scrollController,
+          // 预留迷你播放器高度（56px + 底部 20px 间距），保证最后一首歌曲
+          // 能滚动到迷你播放器上方而不被遮挡。
+          padding: const EdgeInsets.only(
+            bottom: AppSpacing.miniPlayerHeight + AppSpacing.xxxl,
+          ),
+          itemCount: _sortedSongs.length,
       addAutomaticKeepAlives: false,
       addRepaintBoundaries: true,
       itemBuilder: (context, index) {
@@ -774,17 +781,79 @@ class _LocalPlaylistDetailPageState
               song.id,
             );
           },
-          child: SongListItem(
-            song: song,
-            index: index,
-            onPlayTap: () {
-              final controller = ref.read(playbackControllerProvider.notifier);
-              controller.setQueue(_sortedSongs, startIndex: index);
+          // 高亮当前正在播放的歌曲，与本地音乐页面保持一致
+          child: Builder(
+            builder: (context) {
+              final playbackState = ref.read(playbackControllerProvider);
+              final isPlaying = playbackState.currentSong?.id == song.id;
+              return SongListItem(
+                song: song,
+                index: index,
+                isPlaying: isPlaying,
+                onPlayTap: () {
+                  final controller = ref.read(playbackControllerProvider.notifier);
+                  controller.setQueue(_sortedSongs, startIndex: index);
+                },
+                onMenuTap: () => SongActionSheet.show(context, song: song, playlistSongs: _sortedSongs),
+              );
             },
-            onMenuTap: () => SongActionSheet.show(context, song: song, playlistSongs: _sortedSongs),
           ),
         );
       },
+        ),
+        // 定位当前播放歌曲的悬浮按钮（右下角，避开底部迷你播放器）
+        _buildLocateFab(colors),
+      ],
+    );
+  }
+
+  /// 悬浮定位按钮：仅当当前播放的歌曲在本歌单中时显示，
+  /// 点击将歌曲列表滚动到正在播放的那一首。
+  Widget _buildLocateFab(ThemeColors colors) {
+    final currentSong = ref.watch(playbackControllerProvider).currentSong;
+    if (currentSong == null) return const SizedBox.shrink();
+    final index = _sortedSongs.indexWhere((s) => s.id == currentSong.id);
+    if (index == -1) return const SizedBox.shrink();
+
+    return Positioned(
+      right: AppSpacing.lg,
+      bottom: AppSpacing.miniPlayerHeight + AppSpacing.xxl,
+      child: GestureDetector(
+        onTap: () => _locateCurrentSong(),
+        child: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: colors.surface,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: colors.shadow,
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Icon(Icons.my_location, size: 18, color: colors.primary),
+        ),
+      ),
+    );
+  }
+
+  void _locateCurrentSong() {
+    final currentSong = ref.read(playbackControllerProvider).currentSong;
+    if (currentSong == null) return;
+    final index = _sortedSongs.indexWhere((s) => s.id == currentSong.id);
+    if (index == -1) return;
+    if (!_scrollController.hasClients) return;
+
+    const itemHeight = SongListItem.itemExtent;
+    final target = index * itemHeight;
+    final maxExtent = _scrollController.position.maxScrollExtent;
+    _scrollController.animateTo(
+      target.clamp(0.0, maxExtent),
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
     );
   }
 

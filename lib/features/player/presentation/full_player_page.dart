@@ -1,14 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:on_audio_query/on_audio_query.dart';
+
 import '../../../core/l10n/l10n.dart';
-import '../../../core/theme/app_colors.dart';
 import '../../../core/utils/responsive_layout.dart';
 import '../../../shared/widgets/music_cover_image.dart';
 import '../application/playback_controller.dart';
 import '../application/lyric_controller.dart';
-import '../domain/models/playback_state.dart';
 import '../domain/models/play_mode.dart';
 import '../domain/models/song.dart';
 import '../domain/services/cover_color_extractor.dart';
@@ -18,6 +16,7 @@ import '../../../shared/widgets/song_action_sheet.dart';
 import '../../../shared/services/amll_toggle_service.dart';
 import 'widgets/lyric_scroll_view.dart';
 import 'widgets/amll_lyric_player.dart';
+import 'widgets/play_queue_sheet.dart';
 import 'widgets/player_controls.dart';
 import '../platform/audio_effect_service.dart';
 
@@ -213,13 +212,13 @@ class _FullPlayerPageState extends ConsumerState<FullPlayerPage> {
                       const SizedBox(height: 12),
                       _PlayerControls(
                         onQueue: () {
-                          final playbackState = ref.read(
-                            playbackControllerProvider,
+                          showPlayQueueSheet(
+                            context,
+                            playbackState: ref.read(playbackControllerProvider),
+                            controller: ref.read(
+                              playbackControllerProvider.notifier,
+                            ),
                           );
-                          final controller = ref.read(
-                            playbackControllerProvider.notifier,
-                          );
-                          _showPlayQueue(playbackState, controller);
                         },
                       ),
                       SizedBox(height: 16),
@@ -303,13 +302,13 @@ class _FullPlayerPageState extends ConsumerState<FullPlayerPage> {
               const SizedBox(height: 8),
               _PlayerControls(
                 onQueue: () {
-                  final playbackState = ref.read(
-                    playbackControllerProvider,
+                  showPlayQueueSheet(
+                    context,
+                    playbackState: ref.read(playbackControllerProvider),
+                    controller: ref.read(
+                      playbackControllerProvider.notifier,
+                    ),
                   );
-                  final controller = ref.read(
-                    playbackControllerProvider.notifier,
-                  );
-                  _showPlayQueue(playbackState, controller);
                 },
               ),
               const SizedBox(height: 16),
@@ -349,177 +348,6 @@ class _FullPlayerPageState extends ConsumerState<FullPlayerPage> {
           ),
         );
       },
-    );
-  }
-
-  void _showPlayQueue(
-    PlaybackState playbackState,
-    PlaybackController controller,
-  ) {
-    final queue = playbackState.queue;
-    showModalBottomSheet(
-      context: context,
-      sheetAnimationStyle: const AnimationStyle(
-        duration: Duration(milliseconds: 220),
-        reverseDuration: Duration(milliseconds: 180),
-      ),
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (ctx) => Container(
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-        ),
-        child: SafeArea(
-          minimum: const EdgeInsets.only(bottom: 70),
-          child: DraggableScrollableSheet(
-            initialChildSize: 0.6,
-            minChildSize: 0.3,
-            maxChildSize: 0.9,
-            expand: false,
-            builder: (context, scrollController) => Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        context.tr('播放队列'),
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: AppColors.textPrimary,
-                        ),
-                      ),
-                      Row(
-                        children: [
-                          Text(
-                            context.tr('${queue.length}首'),
-                            style: const TextStyle(color: AppColors.textHint),
-                          ),
-                          const SizedBox(width: 16),
-                          GestureDetector(
-                            onTap: () {
-                              controller.clearQueue();
-                              Navigator.pop(ctx);
-                            },
-                            child: Text(
-                              context.tr('清空'),
-                              style: const TextStyle(
-                                color: AppColors.primary,
-                                fontSize: 14,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                if (queue.isEmpty)
-                  Expanded(
-                    child: Center(
-                      child: Text(
-                        context.tr('播放队列为空'),
-                        style: const TextStyle(color: AppColors.textHint),
-                      ),
-                    ),
-                  )
-                else
-                  Expanded(
-                    child: ListView.builder(
-                      controller: scrollController,
-                      itemCount: queue.length,
-                      itemBuilder: (context, index) {
-                        final queueSong = queue[index];
-                        final isCurrent = index == playbackState.currentIndex;
-                        return ListTile(
-                          leading: Container(
-                            width: 44,
-                            height: 44,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(8),
-                              color: AppColors.surfaceVariant,
-                            ),
-                            child:
-                                queueSong.coverUrl != null &&
-                                    queueSong.coverUrl!.isNotEmpty
-                                ? ClipRRect(
-                                    borderRadius: BorderRadius.circular(8),
-                                    child: MusicCoverImage(
-                                      url: queueSong.coverUrl,
-                                      fit: BoxFit.cover,
-                                      errorWidget: Icon(
-                                        Icons.music_note,
-                                        size: 20,
-                                        color: isCurrent
-                                            ? AppColors.primary
-                                            : AppColors.textHint,
-                                      ),
-                                    ),
-                                  )
-                                : Icon(
-                                    Icons.music_note,
-                                    size: 20,
-                                    color: isCurrent
-                                        ? AppColors.primary
-                                        : AppColors.textHint,
-                                  ),
-                          ),
-                          title: Text(
-                            queueSong.title,
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                              color: isCurrent
-                                  ? AppColors.primary
-                                  : AppColors.textPrimary,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            '${queueSong.artist} - ${queueSong.album}',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: isCurrent
-                                  ? AppColors.primary.withValues(alpha: 0.7)
-                                  : AppColors.textHint,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          trailing: isCurrent
-                              ? const Icon(
-                                  Icons.volume_up,
-                                  size: 18,
-                                  color: AppColors.primary,
-                                )
-                              : IconButton(
-                                  icon: const Icon(
-                                    Icons.close,
-                                    size: 18,
-                                    color: AppColors.textHint,
-                                  ),
-                                  onPressed: () {
-                                    controller.removeFromQueue(index);
-                                    Navigator.pop(ctx);
-                                  },
-                                ),
-                          onTap: () {
-                            controller.playSongAt(index);
-                            Navigator.pop(ctx);
-                          },
-                        );
-                      },
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
@@ -636,14 +464,14 @@ class _PlayerCoverPage extends ConsumerWidget {
               ],
             ),
             clipBehavior: Clip.antiAlias,
-            child: _buildCoverImage(song),
+            child: _buildCoverImage(song, ResponsiveLayout.albumArtSize(context)),
           ),
         ),
       ),
     );
   }
 
-  static Widget _buildCoverImage(Song? song) {
+  static Widget _buildCoverImage(Song? song, double artSize) {
     if (song == null) {
       return Container(
         decoration: const BoxDecoration(
@@ -668,13 +496,15 @@ class _PlayerCoverPage extends ConsumerWidget {
       );
     }
     if (song.mediaStoreId != null) {
-      return QueryArtworkWidget(
-        key: ValueKey(song.mediaStoreId),
-        id: song.mediaStoreId!,
-        type: ArtworkType.AUDIO,
-        keepOldArtwork: true,
-        artworkFit: BoxFit.cover,
-        nullArtworkWidget: _fallbackCover(song),
+      return MusicCoverImage(
+        key: ValueKey('fp_cover_${song.id}'),
+        songId: song.id,
+        mediaStoreId: song.mediaStoreId,
+        fit: BoxFit.cover,
+        cacheWidth: 1536,
+        cacheHeight: 1536,
+        filterQuality: FilterQuality.high,
+        errorWidget: _fallbackCover(song),
       );
     }
     return _fallbackCover(song);

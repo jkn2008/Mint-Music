@@ -168,10 +168,10 @@ class LyricController extends StateNotifier<LyricState> {
       }
 
       // Step 2: Fetch online lyrics for tlyric/rlyric when TTML used, or as fallback.
-      // tx/wy 即使已有普通 LRC，也要继续请求一次，避免错过 QRC/YRC 逐字歌词。
+      // tx/wy/kw/kg 即使已有普通 LRC，也要继续请求一次，避免错过 QRC/YRC/逐字歌词。
       if (song.source != null && song.source != 'local') {
         final sourceSupportsWordLyric =
-            song.source == 'tx' || song.source == 'wy';
+            song.source == 'tx' || song.source == 'wy' || song.source == 'kw' || song.source == 'kg';
         final needOnlineLyric =
             (lrc == null || lrc.isEmpty) ||
             (ttmlLines != null) ||

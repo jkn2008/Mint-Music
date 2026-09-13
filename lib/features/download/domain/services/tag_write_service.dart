@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../../../player/domain/models/song.dart';
+import '../../../player/domain/services/lyric_parser.dart';
 
 class TagWriteService {
   static const _channel = MethodChannel('com.mintmusic/tag_writer');
@@ -235,22 +236,144 @@ class TagWriteService {
     return '.jpg';
   }
 
+  /// 逐字歌词格式转换：
+  /// - word-by-word 模式：将 YRC/QRC/KRC 格式转换为增强 LRC 格式
+  ///   （`[mm:ss.ms]<mm:ss.ms>text`），兼容其他播放器
+  /// - 标准模式：清洗为标准 LRC，保证任意播放器都显示干净歌词
   String _convertLrcFormat(String lrc) {
-    return lrc;
+    // 如果已经是增强 LRC 格式，直接保留
+    if (isEnhancedLrcFormat(lrc)) {
+      return lrc;
+    }
+    // 尝试解析为逐字格式并转换为增强 LRC
+    final converted = _convertWordByWordToEnhancedLrc(lrc);
+    if (converted.isNotEmpty) return converted;
+    // 其他格式转换为标准 LRC
+    return _convertToStandardLrc(lrc);
+  }
+
+  /// 将 YRC/QRC/KRC 格式转换为增强 LRC 格式
+  /// YRC 格式: [lineMs,lineDur]text(wordMs,dur,0)text(wordMs,dur,0)text
+  /// QRC 格式: [lineMs,lineDur](wordMs,dur,0)text(wordMs,dur,0)text
+  /// KRC 格式: [lineMs,lineDur]<wordMs,dur,0>text<wordMs,dur,0>text
+  /// 输出: [mm:ss.ms]<mm:ss.ms>text
+  String _convertWordByWordToEnhancedLrc(String lrc) {
+    if (lrc.isEmpty) return '';
+
+    final lines = <String>[];
+    // 匹配行头 [lineMs,lineDur]
+    final lineRegExp = RegExp(r'^\[(\d+),(\d+)\](.*)$');
+    // 匹配 YRC/QRC 词标签 (wordMs,dur,0) 或 KRC 标签 <wordMs,dur,0>
+    final wordRegExp = RegExp(r'[(<](\d+),(\d+)(?:,\d+)?[)>]');
+
+    for (final rawLine in lrc.split('\n')) {
+      final line = rawLine.trim();
+      if (line.isEmpty) continue;
+
+      final lineMatch = lineRegExp.firstMatch(line);
+      if (lineMatch == null) continue;
+
+      final lineStartMs = int.parse(lineMatch.group(1)!);
+      final content = lineMatch.group(3)!;
+
+      // 提取所有词标签的位置
+      final tagMatches = wordRegExp.allMatches(content).toList();
+      if (tagMatches.isEmpty) continue;
+
+      // 构建词列表：(绝对开始时间, 词文本)
+      final words = <MapEntry<int, String>>[];
+
+      // 处理第一个标签之前的文本（QRC格式的第一个字在第一个标签之前）
+      if (tagMatches.first.start > 0) {
+        final firstWordText = content.substring(0, tagMatches.first.start).trim();
+        if (firstWordText.isNotEmpty) {
+          // 使用行开始时间作为第一个字的时间
+          words.add(MapEntry(lineStartMs, firstWordText));
+        }
+      }
+
+      for (int i = 0; i < tagMatches.length; i++) {
+        final tagMatch = tagMatches[i];
+        final absStartMs = int.parse(tagMatch.group(1)!);
+
+        // 词文本在当前标签之后，下一个标签之前
+        final textStart = tagMatch.end;
+        final textEnd = i + 1 < tagMatches.length ? tagMatches[i + 1].start : content.length;
+        final wordText = content.substring(textStart, textEnd).trim();
+
+        if (wordText.isNotEmpty) {
+          words.add(MapEntry(absStartMs, wordText));
+        }
+      }
+
+      if (words.isEmpty) continue;
+
+      // 构建增强 LRC 行: [mm:ss.ms]<mm:ss.ms>text
+      final buffer = StringBuffer();
+      buffer.write(_formatLrcTimestamp(lineStartMs));
+      for (final entry in words) {
+        // <mm:ss.ms>text
+        final ms = entry.key;
+        final mm = (ms ~/ 60000).toString().padLeft(2, '0');
+        final ss = ((ms % 60000) ~/ 1000).toString().padLeft(2, '0');
+        final xxx = (ms % 1000).toString().padLeft(3, '0');
+        buffer.write('<$mm:$ss.$xxx>');
+        buffer.write(entry.value);
+      }
+      lines.add(buffer.toString());
+    }
+
+    return lines.join('\n');
   }
 
   String _convertToStandardLrc(String lrc) {
-    final lines = lrc.split('\n');
-    final standardLines = <String>[];
-    for (final line in lines) {
-      final timeTagRegex = RegExp(r'\[(\d{2}):(\d{2})\.(\d{2,3})\]');
-      final match = timeTagRegex.firstMatch(line);
-      if (match != null) {
-        standardLines.add(line);
-      } else if (line.startsWith('[') && !line.contains(':')) {
-        standardLines.add(line);
+    if (lrc.isEmpty) return '';
+
+    final lines = parseLyricAuto(lrc);
+    if (lines.isNotEmpty) {
+      final buffer = StringBuffer();
+      for (final line in lines) {
+        final text = line.plainText.trim();
+        if (text.isEmpty) continue;
+        buffer.writeln('${_formatLrcTimestamp(line.startTimeMs)}$text');
       }
+      final converted = buffer.toString().trim();
+      if (converted.isNotEmpty) return converted;
     }
-    return standardLines.isNotEmpty ? standardLines.join('\n') : lrc;
+
+    return _cleanRawLrc(lrc);
+  }
+
+  String _formatLrcTimestamp(int ms) {
+    final mm = (ms ~/ 60000).toString().padLeft(2, '0');
+    final ss = ((ms % 60000) ~/ 1000).toString().padLeft(2, '0');
+    final xxx = (ms % 1000).toString().padLeft(3, '0');
+    return '[$mm:$ss.$xxx]';
+  }
+
+  /// 解析失败时的兜底清洗：保留行首时间戳，剥离所有词级标记，
+  /// 避免普通播放器把标签当歌词文本显示。
+  String _cleanRawLrc(String lrc) {
+    final buffer = StringBuffer();
+    final lineRegExp = RegExp(r'^\[(\d{1,2}):(\d{2})[.:](\d{1,3})\](.*)$');
+    for (final rawLine in lrc.split('\n')) {
+      final line = rawLine.trim();
+      if (line.isEmpty) continue;
+      final m = lineRegExp.firstMatch(line);
+      if (m == null) continue;
+      final head = line.substring(0, m.group(0)!.indexOf(']') + 1);
+      final text = m
+          .group(4)!
+          .replaceAll(RegExp(r'[(（]\d+[,，]\d+(?:[,，]\d+)?[)）]'), '')
+          .replaceAll(RegExp(r'<\d+(?:,\d+)+>'), '')
+          .replaceAll(
+            RegExp(r'[\[\［]\d{1,2}:\d{1,2}(?:[.:]\d{1,3})?[\]\］]'),
+            '',
+          )
+          .trim();
+      if (text.isEmpty) continue;
+      buffer.writeln('$head$text');
+    }
+    return buffer.toString().trim();
   }
 }

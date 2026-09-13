@@ -92,11 +92,21 @@ class NeteaseMusicSource implements MusicSourceProvider {
     if (value == null) return null;
     final raw = value.toString().trim();
     if (raw.isEmpty) return null;
-    final normalized = raw.startsWith('//')
+    var normalized = raw.startsWith('//')
         ? 'https:$raw'
         : raw.startsWith('http://')
         ? 'https://${raw.substring(7)}'
         : raw;
+    // 网易 CDN：确保加载高清封面
+    if (normalized.contains('music.126.net')) {
+      // 去掉所有现有参数
+      final queryIndex = normalized.indexOf('?');
+      if (queryIndex != -1) {
+        normalized = normalized.substring(0, queryIndex);
+      }
+      // 追加高清尺寸参数
+      normalized = '$normalized?param=400y400';
+    }
     final uri = Uri.tryParse(normalized);
     if (uri == null ||
         (uri.scheme != 'http' && uri.scheme != 'https') ||

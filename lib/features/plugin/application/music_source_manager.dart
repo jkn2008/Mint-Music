@@ -1381,7 +1381,8 @@ class MusicSourceManager {
           final result = await host.getLyricResult(pluginSourceId, musicInfo);
           if (_hasWordLyric(result)) return result;
           if (_hasLyric(result)) {
-            if (sourceId != 'tx') return result;
+            // 对于所有源，如果有逐字歌词的可能，继续尝试内建源
+            // 只有 TX 源需要特殊处理 numeric ID
             pluginFallback = result;
           }
         } catch (e) {

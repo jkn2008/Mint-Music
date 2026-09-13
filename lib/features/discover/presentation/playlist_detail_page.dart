@@ -27,6 +27,13 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   bool _isMultiSelectMode = false;
   final Set<String> _selectedSongIds = {};
   bool _isFavorited = false;
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -91,6 +98,16 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     final colors = ref.watch(themeColorsProvider);
     final playlistAsync = ref.watch(playlistDetailProvider(widget.playlistId));
 
+    // 提前计算当前播放歌曲在本歌单中的索引，用于定位按钮。
+    // 在外层 Stack 中直接渲染 FAB，避免嵌套 Stack 裁剪导致按钮不可见。
+    final currentSong = ref.watch(playbackControllerProvider).currentSong;
+    final int currentSongIndex = playlistAsync.maybeWhen(
+      data: (playlist) => (playlist != null && currentSong != null)
+          ? playlist.songs.indexWhere((s) => s.id == currentSong.id)
+          : -1,
+      orElse: () => -1,
+    );
+
     return Scaffold(
       backgroundColor: colors.background,
       body: Stack(
@@ -128,6 +145,8 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                   bottom: 20,
                   child: RepaintBoundary(child: const MiniPlayer()),
                 ),
+          // 定位当前播放歌曲的悬浮按钮：放在外层 Stack 中避免被裁剪
+          if (currentSongIndex >= 0) _buildLocateFab(colors, currentSongIndex),
         ],
       ),
     );
@@ -333,6 +352,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     }
 
     return ListView.builder(
+      controller: _scrollController,
       // 预留迷你播放器高度（56px + 底部 20px 间距），保证最后一首歌曲
       // 能滚动到迷你播放器上方而不被遮挡。
       padding: const EdgeInsets.only(
@@ -349,9 +369,17 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
           return _buildMultiSelectItem(colors, song, isSelected, songs);
         }
 
+        // 高亮当前正在播放的歌曲，与本地音乐页面保持一致
+        final currentSongId = ref
+            .read(playbackControllerProvider)
+            .currentSong
+            ?.id;
+        final isPlaying = currentSongId != null && currentSongId == song.id;
+
         return SongListItem(
           song: song,
           index: index,
+          isPlaying: isPlaying,
           onPlayTap: () async {
             final controller = ref.read(playbackControllerProvider.notifier);
             await controller.setQueue(songs, startIndex: index);
@@ -359,6 +387,50 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
           onMenuTap: () => SongActionSheet.show(context, song: song, playlistSongs: songs),
         );
       },
+    );
+  }
+
+  /// 悬浮定位按钮：仅当当前播放的歌曲在本歌单中时显示，
+  /// 点击将歌曲列表滚动到正在播放的那一首。
+  Widget _buildLocateFab(ThemeColors colors, int currentIndex) {
+    if (currentIndex < 0) return const SizedBox.shrink();
+
+    return Positioned(
+      right: AppSpacing.lg,
+      bottom: AppSpacing.miniPlayerHeight + AppSpacing.xxxl + AppSpacing.lg,
+      child: GestureDetector(
+        onTap: () => _locateCurrentSong(currentIndex),
+        child: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: colors.surface,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: colors.shadow,
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Icon(Icons.my_location, size: 18, color: colors.primary),
+        ),
+      ),
+    );
+  }
+
+  void _locateCurrentSong(int currentIndex) {
+    if (!_scrollController.hasClients) return;
+
+    const itemHeight = SongListItem.itemExtent;
+    // 稍微往上预留一点空间，防止歌曲行被迷你播放器遮挡显示不全
+    final target = (currentIndex * itemHeight) - 8.0;
+    final maxExtent = _scrollController.position.maxScrollExtent;
+    _scrollController.animateTo(
+      target.clamp(0.0, maxExtent),
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
     );
   }
 

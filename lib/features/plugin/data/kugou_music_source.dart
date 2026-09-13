@@ -84,6 +84,11 @@ class KugouMusicSource implements MusicSourceProvider {
         .replaceAll('&nbsp;', ' ');
   }
 
+  String? _nonEmptyOrNull(String? value) {
+    if (value == null || value.trim().isEmpty) return null;
+    return value;
+  }
+
   @override
   Future<List<Song>> search(
     String query, {
@@ -1293,16 +1298,16 @@ class KugouMusicSource implements MusicSourceProvider {
         name: '语种',
         tags: [
           const PlaylistTag(id: '', name: '全部', source: 'kg'),
-          const PlaylistTag(id: '华语', name: '华语', source: 'kg'),
-          const PlaylistTag(id: '欧美', name: '欧美', source: 'kg'),
+          const PlaylistTag(id: '11', name: '华语', source: 'kg'),
+          const PlaylistTag(id: '15', name: '欧美', source: 'kg'),
         ],
       ),
       PlaylistTagGroup(
         name: '风格',
         tags: [
-          const PlaylistTag(id: '流行', name: '流行', source: 'kg'),
-          const PlaylistTag(id: '摇滚', name: '摇滚', source: 'kg'),
-          const PlaylistTag(id: '民谣', name: '民谣', source: 'kg'),
+          const PlaylistTag(id: '30', name: '流行', source: 'kg'),
+          const PlaylistTag(id: '850', name: '电子', source: 'kg'),
+          const PlaylistTag(id: '10', name: 'DJ', source: 'kg'),
         ],
       ),
     ];
@@ -1310,11 +1315,13 @@ class KugouMusicSource implements MusicSourceProvider {
 
   @override
   Future<List<PlaylistTag>> getHotPlaylistTags() async {
+    // 注意：标签 id 是酷狗 getSpecial 接口的「风格分类 id」（数字）。
+    // 中文 id（如 '华语'）接口不识别，会导致所有标签返回同一批默认歌单。
+    // 以下 id 均实测有效：11=中国风/国风（华语向）、30=流行/R&B、850=电音。
     return [
-      const PlaylistTag(id: '', name: '全部', source: 'kg'),
-      const PlaylistTag(id: '华语', name: '华语', source: 'kg'),
-      const PlaylistTag(id: '流行', name: '流行', source: 'kg'),
-      const PlaylistTag(id: '电子', name: '电子', source: 'kg'),
+      const PlaylistTag(id: '11', name: '华语', source: 'kg'),
+      const PlaylistTag(id: '30', name: '流行', source: 'kg'),
+      const PlaylistTag(id: '850', name: '电子', source: 'kg'),
     ];
   }
 
@@ -1402,7 +1409,11 @@ class KugouMusicSource implements MusicSourceProvider {
               name: item['rankname']?.toString() ?? '',
               coverUrl: _normalizeKugouImage(cover, '400'),
               playCount: _formatPlayCount(item['play_times']),
-              updateFrequency: item['update_frequency_type']?.toString(),
+              // update_frequency 是文本（如「每天」）；update_frequency_type
+              // 是数字码（0/1/2…），直接显示会被误当成歌曲数量。
+              updateFrequency: _nonEmptyOrNull(
+                item['update_frequency']?.toString(),
+              ),
               source: 'kg',
             );
           })

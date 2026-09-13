@@ -64,6 +64,24 @@ final downloadRepositoryProvider = Provider<DownloadRepository>((ref) {
     }
   });
 
+  // 设置逐字歌词获取器（下载时获取逐字歌词）
+  repo.setLyricResultFetcher((song) async {
+    try {
+      return await musicSourceManager.getLyricResult(song);
+    } catch (e) {
+      return null;
+    }
+  });
+
+  // 设置封面获取器（下载时获取高清封面URL）
+  repo.setCoverFetcher((song) async {
+    try {
+      return await musicSourceManager.getPic(song);
+    } catch (e) {
+      return null;
+    }
+  });
+
   // 设置音质验证器
   repo.setQualityValidator((sourceId) {
     return musicSourceManager.getSupportedQualitiesForSourceId(sourceId);

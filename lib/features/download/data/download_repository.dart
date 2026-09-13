@@ -12,10 +12,13 @@ import '../../../core/platform/permission_helper.dart';
 import '../domain/models/download_task.dart';
 import '../domain/services/tag_write_service.dart';
 import '../../player/domain/models/song.dart';
+import '../../player/domain/models/lyric_line.dart';
 
 typedef UrlFetcher = Future<String?> Function(DownloadTask task);
 typedef TagWriteOptionsFetcher = TagWriteOptions Function();
 typedef LyricFetcher = Future<String?> Function(Song song);
+typedef LyricResultFetcher = Future<LyricResult?> Function(Song song);
+typedef CoverFetcher = Future<String?> Function(Song song);
 typedef QualityValidator = List<String> Function(String sourceId);
 
 class TagWriteOptions {
@@ -61,6 +64,8 @@ class DownloadRepository {
   final TagWriteService _tagWriteService = TagWriteService();
   TagWriteOptionsFetcher? _tagWriteOptionsFetcher;
   LyricFetcher? _lyricFetcher;
+  LyricResultFetcher? _lyricResultFetcher;
+  CoverFetcher? _coverFetcher;
   QualityValidator? _qualityValidator;
 
   void Function(DownloadTask task, {Color? backgroundColor})? onTaskStarted;
@@ -77,6 +82,8 @@ class DownloadRepository {
   void setUrlFetcher(UrlFetcher fetcher) => _urlFetcher = fetcher;
   void setTagWriteOptionsFetcher(TagWriteOptionsFetcher fetcher) => _tagWriteOptionsFetcher = fetcher;
   void setLyricFetcher(LyricFetcher fetcher) => _lyricFetcher = fetcher;
+  void setLyricResultFetcher(LyricResultFetcher fetcher) => _lyricResultFetcher = fetcher;
+  void setCoverFetcher(CoverFetcher fetcher) => _coverFetcher = fetcher;
   void setQualityValidator(QualityValidator validator) => _qualityValidator = validator;
 
   Future<void> init({String? downloadDir, bool? wifiOnly, int? maxConcurrent}) async {
@@ -663,7 +670,23 @@ class DownloadRepository {
           Song songForTag = task.song;
           debugPrint('[DownloadRepository] 标签写入选项: basicInfo=${tagOpts.basicInfo}, cover=${tagOpts.cover}, lyrics=${tagOpts.lyrics}, downloadLyrics=${tagOpts.downloadLyrics}, lyricFormat=${tagOpts.lyricFormat}');
           debugPrint('[DownloadRepository] 歌词获取器: ${_lyricFetcher != null}, song.lrc: ${songForTag.lrc != null ? "has ${songForTag.lrc!.length} chars" : "null"}');
-          if ((tagOpts.lyrics || tagOpts.downloadLyrics) && _lyricFetcher != null) {
+          if ((tagOpts.lyrics || tagOpts.downloadLyrics) && _lyricResultFetcher != null) {
+            try {
+              final lyricResult = await _lyricResultFetcher!(songForTag);
+              debugPrint('[DownloadRepository] 歌词获取结果: lrc=${lyricResult?.lrc != null ? "has ${lyricResult!.lrc!.length} chars" : "null"}, crlyric=${lyricResult?.crlyric != null ? "has ${lyricResult!.crlyric!.length} chars" : "null"}');
+              if (lyricResult != null) {
+                // 优先使用逐字歌词（crlyric），否则使用标准歌词（lrc）
+                final preferredLyric = tagOpts.lyricFormat == 'word-by-word'
+                    ? (lyricResult.crlyric?.isNotEmpty == true ? lyricResult.crlyric : lyricResult.lrc)
+                    : lyricResult.lrc;
+                if (preferredLyric != null && preferredLyric.isNotEmpty) {
+                  songForTag = songForTag.copyWith(lrc: preferredLyric);
+                }
+              }
+            } catch (e) {
+              debugPrint('[DownloadRepository] 获取歌词失败: $e');
+            }
+          } else if ((tagOpts.lyrics || tagOpts.downloadLyrics) && _lyricFetcher != null) {
             try {
               final lrc = await _lyricFetcher!(songForTag);
               debugPrint('[DownloadRepository] 歌词获取结果: ${lrc != null ? "has ${lrc.length} chars" : "null"}');
@@ -672,6 +695,17 @@ class DownloadRepository {
               }
             } catch (e) {
               debugPrint('[DownloadRepository] 获取歌词失败: $e');
+            }
+          }
+          if (tagOpts.cover && _coverFetcher != null) {
+            try {
+              final highResCover = await _coverFetcher!(songForTag);
+              debugPrint('[DownloadRepository] 高清封面获取结果: ${highResCover != null ? highResCover.substring(0, highResCover.length.clamp(0, 80)) : "null"}');
+              if (highResCover != null && highResCover.isNotEmpty) {
+                songForTag = songForTag.copyWith(coverUrl: highResCover);
+              }
+            } catch (e) {
+              debugPrint('[DownloadRepository] 获取高清封面失败: $e');
             }
           }
           await _tagWriteService.processSongFiles(

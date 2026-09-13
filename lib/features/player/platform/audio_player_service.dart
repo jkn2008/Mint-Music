@@ -4,14 +4,13 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
-import 'package:on_audio_query/on_audio_query.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../domain/models/song.dart';
+import '../../../shared/services/cover_cache_service.dart';
 
 class AudioPlayerService {
   final AudioPlayer _player = AudioPlayer();
-  final OnAudioQuery _audioQuery = OnAudioQuery();
   final StreamController<String> _errorController =
       StreamController<String>.broadcast();
 
@@ -132,21 +131,23 @@ class AudioPlayerService {
 
   Future<List<Song>> _prepareLocalCovers(List<Song> songs) async {
     final List<Song> result = [];
+    final coverCache = CoverCacheService();
     Directory? coverDir;
 
     for (final song in songs) {
       if (song.coverUrl == null && song.mediaStoreId != null) {
         try {
-          coverDir ??= await _getCoverCacheDir();
-          final bytes = await _audioQuery.queryArtwork(
-            song.mediaStoreId!,
-            ArtworkType.AUDIO,
-            quality: 100,
-            size: 400,
+          // 优先从 CoverCacheService 获取（内存/磁盘缓存 + MediaStore 提取）
+          final bytes = await coverCache.getArtwork(
+            song.id,
+            mediaStoreId: song.mediaStoreId,
           );
           if (bytes != null && bytes.isNotEmpty) {
+            coverDir ??= await _getCoverCacheDir();
             final coverPath = '${coverDir.path}/${song.id}.jpg';
-            await File(coverPath).writeAsBytes(bytes);
+            if (!await File(coverPath).exists()) {
+              await File(coverPath).writeAsBytes(bytes);
+            }
             result.add(song.copyWith(coverUrl: coverPath));
             debugPrint('AudioPlayerService: 提取封面成功 ${song.title}');
             continue;

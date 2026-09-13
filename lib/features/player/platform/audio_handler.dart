@@ -6,15 +6,14 @@ import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
-import 'package:on_audio_query/on_audio_query.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../domain/models/song.dart';
+import '../../../shared/services/cover_cache_service.dart';
 
 class MusicAudioHandler extends BaseAudioHandler
     with QueueHandler, SeekHandler {
   final AudioPlayer _player = AudioPlayer();
-  final OnAudioQuery _audioQuery = OnAudioQuery();
   final StreamController<String> _errorController =
       StreamController<String>.broadcast();
 
@@ -280,24 +279,23 @@ class MusicAudioHandler extends BaseAudioHandler
     int currentIndex = -1,
   }) async {
     final result = List<Song?>.filled(songs.length, null);
-    Directory? coverDir;
+    final coverCache = CoverCacheService();
 
     Future<Song> processSong(Song song) async {
       if (song.coverUrl == null && song.mediaStoreId != null) {
         try {
-          coverDir ??= await _getCoverCacheDir();
-          final coverPath = '${coverDir!.path}/${song.id}.jpg';
-          if (await File(coverPath).exists()) {
-            return song.copyWith(coverUrl: coverPath);
-          }
-          final bytes = await _audioQuery.queryArtwork(
-            song.mediaStoreId!,
-            ArtworkType.AUDIO,
-            quality: 100,
-            size: 400,
+          // 优先从 CoverCacheService 获取（内存/磁盘缓存 + MediaStore 提取）
+          final bytes = await coverCache.getArtwork(
+            song.id,
+            mediaStoreId: song.mediaStoreId,
           );
           if (bytes != null && bytes.isNotEmpty) {
-            await File(coverPath).writeAsBytes(bytes);
+            // 写入播放器专用的缓存目录（供 MediaSession 使用）
+            final coverDir = await _getCoverCacheDir();
+            final coverPath = '${coverDir!.path}/${song.id}.jpg';
+            if (!await File(coverPath).exists()) {
+              await File(coverPath).writeAsBytes(bytes);
+            }
             return song.copyWith(coverUrl: coverPath);
           }
         } catch (e) {

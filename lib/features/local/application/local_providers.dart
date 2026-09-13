@@ -1,14 +1,25 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:on_audio_query/on_audio_query.dart';
 import '../data/local_music_repository.dart';
 import '../../player/domain/models/song.dart';
+import '../../../shared/services/cover_cache_service.dart';
 
 final localMusicRepositoryProvider = Provider<LocalMusicRepository>((ref) {
+  // 保持单例：目录/歌曲索引存在内存里，若随监听者销毁重建，
+  // 新实例不会自动 init，导致扫描目录设置"消失"。
+  ref.keepAlive();
   return LocalMusicRepository();
 });
 
 final onAudioQueryProvider = Provider<OnAudioQuery>((ref) {
   return OnAudioQuery();
+});
+
+final coverCacheServiceProvider = Provider<CoverCacheService>((ref) {
+  ref.keepAlive();
+  return CoverCacheService();
 });
 
 final localPermissionProvider = StateProvider<AsyncValue<bool>>((ref) {
@@ -40,8 +51,11 @@ final filteredLocalSongsProvider = Provider<List<Song>>((ref) {
   );
 });
 
-final scannedDirectoriesProvider = Provider<List<String>>((ref) {
+/// 已保存的扫描目录。异步加载以确保从持久化恢复
+/// （repo 为单例，init 后结果会缓存）。
+final scannedDirectoriesProvider = FutureProvider<List<String>>((ref) async {
   final repo = ref.watch(localMusicRepositoryProvider);
+  await repo.init();
   return repo.getScannedDirectories();
 });
 
@@ -78,9 +92,28 @@ class LocalMusicNotifier extends StateNotifier<AsyncValue<List<Song>>> {
       }
 
       state = AsyncValue.data(repo.getLocalSongs());
+
+      // 后台预加载封面缓存（不阻塞 UI）
+      _preloadCovers(repo.getLocalSongs());
     } catch (e, st) {
       state = AsyncValue.error(e, st);
     }
+  }
+
+  /// 后台预加载所有本地歌曲的封面到缓存（内存 + 磁盘）。
+  /// 首次访问时从 MediaStore 提取，后续直接从缓存读取。
+  void _preloadCovers(List<Song> songs) {
+    if (songs.isEmpty) return;
+    final cache = _ref.read(coverCacheServiceProvider);
+    unawaited(cache.preloadBatch(
+      songs,
+      concurrency: 10,
+      onProgress: (completed, total) {
+        if (completed % 20 == 0 || completed == total) {
+          debugPrint('[LocalMusic] 封面预加载进度: $completed/$total');
+        }
+      },
+    ));
   }
 
   Future<bool> requestPermissionAndScan() async {
@@ -104,6 +137,7 @@ class LocalMusicNotifier extends StateNotifier<AsyncValue<List<Song>>> {
     try {
       final repo = _ref.read(localMusicRepositoryProvider);
       await repo.addDirectory(dirPath);
+      _refreshScannedDirs();
       state = AsyncValue.data(repo.getLocalSongs());
     } catch (e, st) {
       state = AsyncValue.error(e, st);
@@ -114,6 +148,7 @@ class LocalMusicNotifier extends StateNotifier<AsyncValue<List<Song>>> {
     try {
       final repo = _ref.read(localMusicRepositoryProvider);
       await repo.removeDirectory(dirPath);
+      _refreshScannedDirs();
       state = AsyncValue.data(repo.getLocalSongs());
     } catch (e, st) {
       state = AsyncValue.error(e, st);
@@ -124,10 +159,16 @@ class LocalMusicNotifier extends StateNotifier<AsyncValue<List<Song>>> {
     try {
       final repo = _ref.read(localMusicRepositoryProvider);
       await repo.setDirectories(dirs);
+      _refreshScannedDirs();
       state = AsyncValue.data(repo.getLocalSongs());
     } catch (e, st) {
       state = AsyncValue.error(e, st);
     }
+  }
+
+  /// 目录变更后使扫描目录缓存失效，保证弹窗再次打开时读到最新列表。
+  void _refreshScannedDirs() {
+    _ref.invalidate(scannedDirectoriesProvider);
   }
 
   Future<void> scanAll() async {
@@ -139,6 +180,9 @@ class LocalMusicNotifier extends StateNotifier<AsyncValue<List<Song>>> {
         },
       );
       state = AsyncValue.data(repo.getLocalSongs());
+
+      // 后台预加载封面缓存
+      _preloadCovers(repo.getLocalSongs());
     } catch (e, st) {
       state = AsyncValue.error(e, st);
     }

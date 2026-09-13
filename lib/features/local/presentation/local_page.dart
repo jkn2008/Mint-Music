@@ -1,7 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:on_audio_query/on_audio_query.dart';
+
 import 'package:file_picker/file_picker.dart';
 import '../../../core/l10n/l10n.dart';
 import '../../../core/theme/app_spacing.dart';
@@ -27,12 +29,10 @@ class LocalPage extends ConsumerStatefulWidget {
 class _LocalPageState extends ConsumerState<LocalPage> {
   final _searchController = TextEditingController();
   final _scrollController = ScrollController();
-  bool _showLocateBtn = false;
 
   @override
   void initState() {
     super.initState();
-    _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkPermissionAndScan();
     });
@@ -93,21 +93,6 @@ class _LocalPageState extends ConsumerState<LocalPage> {
     );
   }
 
-  void _onScroll() {
-    final playbackState = ref.read(playbackControllerProvider);
-    final currentSong = playbackState.currentSong;
-    if (currentSong == null || currentSong.source != 'local') {
-      if (_showLocateBtn) setState(() => _showLocateBtn = false);
-      return;
-    }
-    setState(() => _showLocateBtn = true);
-    Future.delayed(const Duration(seconds: 3), () {
-      if (mounted && !_scrollController.position.isScrollingNotifier.value) {
-        setState(() => _showLocateBtn = false);
-      }
-    });
-  }
-
   void _locateCurrentSong() {
     final playbackState = ref.read(playbackControllerProvider);
     final currentSong = playbackState.currentSong;
@@ -117,13 +102,15 @@ class _LocalPageState extends ConsumerState<LocalPage> {
     final index = songs.indexWhere((s) => s.id == currentSong.id);
     if (index == -1) return;
 
-    final itemHeight = 72.0;
+    final itemHeight = 66.0;
+    // 稍微往上预留一点空间，防止歌曲行被迷你播放器遮挡显示不全
+    final target = (index * itemHeight) - 8.0;
+    final maxExtent = _scrollController.position.maxScrollExtent;
     _scrollController.animateTo(
-      index * itemHeight,
+      target.clamp(0.0, maxExtent),
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
     );
-    setState(() => _showLocateBtn = false);
   }
 
   @override
@@ -132,6 +119,13 @@ class _LocalPageState extends ConsumerState<LocalPage> {
     final songs = ref.watch(filteredLocalSongsProvider);
     final songsAsync = ref.watch(localMusicNotifierProvider);
     final scanProgress = ref.watch(scanProgressProvider);
+
+    // 在 build 中直接计算按钮可见性，避免滚动事件初值问题导致按钮永远不显示。
+    // 仅当正在播放本地歌曲且该歌曲在当前筛选列表中时显示。
+    final currentSong = ref.watch(playbackControllerProvider.select((s) => s.currentSong));
+    final showLocateBtn = currentSong != null &&
+        currentSong.source == 'local' &&
+        songs.indexWhere((s) => s.id == currentSong.id) >= 0;
 
     return Scaffold(
       backgroundColor: colors.background,
@@ -144,7 +138,7 @@ class _LocalPageState extends ConsumerState<LocalPage> {
             const SizedBox(height: AppSpacing.sm),
             Expanded(
               child: songsAsync.when(
-                data: (_) => _buildSongList(colors, songs),
+                data: (_) => _buildSongList(colors, songs, showLocateBtn),
                 loading: () => const Center(child: CircularProgressIndicator()),
                 error: (e, _) => _buildErrorState(colors, e.toString()),
               ),
@@ -330,7 +324,7 @@ class _LocalPageState extends ConsumerState<LocalPage> {
     );
   }
 
-  Widget _buildSongList(ThemeColors colors, List<Song> songs) {
+  Widget _buildSongList(ThemeColors colors, List<Song> songs, bool showLocateBtn) {
     if (songs.isEmpty) {
       return _buildEmptyState(colors);
     }
@@ -351,11 +345,37 @@ class _LocalPageState extends ConsumerState<LocalPage> {
             return _LocalSongItem(
               key: ValueKey(songs[index].id),
               song: songs[index],
+              index: index,
               onPlay: _playSong,
               onContextMenu: _showSongContextMenu,
             );
           },
         ),
+        // 定位当前播放歌曲的悬浮按钮（右下角，避开底部迷你播放器）
+        if (showLocateBtn)
+          Positioned(
+            right: AppSpacing.lg,
+            bottom: AppSpacing.miniPlayerHeight + AppSpacing.xxl,
+            child: GestureDetector(
+              onTap: _locateCurrentSong,
+              child: Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: colors.surface,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: colors.shadow,
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Icon(Icons.my_location, size: 18, color: colors.primary),
+              ),
+            ),
+          ),
       ],
     );
   }
@@ -1140,8 +1160,10 @@ class _LocalPageState extends ConsumerState<LocalPage> {
     );
   }
 
-  void _showDirModal(ThemeColors colors) {
-    final dirs = List<String>.from(ref.read(scannedDirectoriesProvider));
+  Future<void> _showDirModal(ThemeColors colors) async {
+    // 从持久化加载真实目录（FutureProvider 首次 init 后走缓存）。
+    final dirs = List<String>.from(await ref.read(scannedDirectoriesProvider.future));
+    if (!mounted) return;
     final bottomPadding = MediaQuery.of(context).padding.bottom;
 
     showModalBottomSheet(
@@ -1232,6 +1254,12 @@ class _LocalPageState extends ConsumerState<LocalPage> {
                                     onTap: () {
                                       dirs.remove(d);
                                       setModalState(() {});
+                                      // 立即持久化，避免不点确认直接关闭弹窗后丢失
+                                      unawaited(
+                                        ref
+                                            .read(localMusicNotifierProvider.notifier)
+                                            .setDirectories(dirs),
+                                      );
                                     },
                                     child: Icon(Icons.close, size: 16, color: colors.textHint),
                                   ),
@@ -1249,6 +1277,11 @@ class _LocalPageState extends ConsumerState<LocalPage> {
                               onTap: () {
                                 dirs.clear();
                                 setModalState(() {});
+                                unawaited(
+                                  ref
+                                      .read(localMusicNotifierProvider.notifier)
+                                      .setDirectories(dirs),
+                                );
                               },
                               child: Container(
                                 padding: const EdgeInsets.symmetric(vertical: 12),
@@ -1277,6 +1310,11 @@ class _LocalPageState extends ConsumerState<LocalPage> {
                                 if (result != null && !dirs.contains(result)) {
                                   dirs.add(result);
                                   setModalState(() {});
+                                  unawaited(
+                                    ref
+                                        .read(localMusicNotifierProvider.notifier)
+                                        .setDirectories(dirs),
+                                  );
                                 }
                               },
                               child: Container(
@@ -1360,11 +1398,13 @@ class _LocalSongItem extends ConsumerWidget {
   const _LocalSongItem({
     super.key,
     required this.song,
+    required this.index,
     required this.onPlay,
     required this.onContextMenu,
   });
 
   final Song song;
+  final int index;
   final void Function(Song song) onPlay;
   final void Function(ThemeColors colors, Song song) onContextMenu;
 
@@ -1385,6 +1425,22 @@ class _LocalSongItem extends ConsumerWidget {
         ),
         child: Row(
           children: [
+            // 序号
+            SizedBox(
+              width: 28,
+              child: isPlaying
+                  ? Icon(Icons.play_arrow, size: 18, color: colors.primary)
+                  : Text(
+                      '${index + 1}',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: colors.textHint,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+            ),
+            const SizedBox(width: AppSpacing.sm),
             Container(
               width: 48,
               height: 48,
@@ -1410,17 +1466,21 @@ class _LocalSongItem extends ConsumerWidget {
                       ),
                     )
                   : song.mediaStoreId != null
-                      ? QueryArtworkWidget(
-                          key: ValueKey(song.mediaStoreId),
-                          id: song.mediaStoreId!,
-                          type: ArtworkType.AUDIO,
-                          keepOldArtwork: true,
-                          artworkBorder: BorderRadius.circular(AppRadius.sm),
-                          artworkFit: BoxFit.cover,
-                          nullArtworkWidget: Icon(
-                            isPlaying ? Icons.equalizer : Icons.music_note,
-                            size: 22,
-                            color: isPlaying ? colors.primary : colors.textHint,
+                      ? ClipRRect(
+                          borderRadius: BorderRadius.circular(AppRadius.sm),
+                          child: MusicCoverImage(
+                            key: ValueKey('local_cover_${song.id}'),
+                            songId: song.id,
+                            mediaStoreId: song.mediaStoreId,
+                            fit: BoxFit.cover,
+                            width: 48,
+                            height: 48,
+                            errorWidget: Icon(
+                              isPlaying ? Icons.equalizer : Icons.music_note,
+                              size: 22,
+                              color:
+                                  isPlaying ? colors.primary : colors.textHint,
+                            ),
                           ),
                         )
                       : Icon(

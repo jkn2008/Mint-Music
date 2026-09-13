@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:on_audio_query/on_audio_query.dart';
+
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/theme/theme_provider.dart';
 import '../../../core/utils/responsive_layout.dart';
 import '../../../shared/widgets/music_cover_image.dart';
 import '../application/playback_controller.dart';
 import '../domain/models/song.dart';
+import 'widgets/play_queue_sheet.dart';
 
 class MiniPlayer extends ConsumerWidget {
   const MiniPlayer({super.key});
@@ -66,7 +67,7 @@ class MiniPlayer extends ConsumerWidget {
                   width: artSize,
                   height: artSize,
                   decoration: BoxDecoration(color: colors.surfaceVariant),
-                  child: _buildCover(colors, song),
+                  child: _buildCover(colors, song, artSize),
                 ),
               ),
               const SizedBox(width: AppSpacing.sm),
@@ -95,7 +96,12 @@ class MiniPlayer extends ConsumerWidget {
                   ],
                 ),
               ),
+              // 控制按钮紧凑靠右：间距略小于默认 IconButton 视觉边距，
+              // 上一首 / 播放暂停 / 下一首 / 播放队列四个按钮排成一组。
               IconButton(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                constraints: const BoxConstraints(minWidth: 32),
                 icon: Icon(
                   Icons.skip_previous,
                   size: iconSize,
@@ -104,6 +110,9 @@ class MiniPlayer extends ConsumerWidget {
                 onPressed: () => controller.previous(),
               ),
               IconButton(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                constraints: const BoxConstraints(minWidth: 32),
                 icon: isLoading
                     ? SizedBox(
                         width: iconSize,
@@ -123,6 +132,9 @@ class MiniPlayer extends ConsumerWidget {
                 onPressed: isLoading ? null : () => controller.togglePlayPause(),
               ),
               IconButton(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                constraints: const BoxConstraints(minWidth: 32),
                 icon: Icon(
                   Icons.skip_next,
                   size: iconSize,
@@ -130,7 +142,24 @@ class MiniPlayer extends ConsumerWidget {
                 ),
                 onPressed: () => controller.next(),
               ),
-              const SizedBox(width: AppSpacing.xs),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.only(left: 4, right: 8),
+                constraints: const BoxConstraints(minWidth: 32),
+                icon: Icon(
+                  Icons.queue_music,
+                  size: iconSize,
+                  color: colors.textSecondary,
+                ),
+                // 与全屏播放页相同的播放队列面板，点击直接弹出，无需跳转
+                onPressed: () {
+                  showPlayQueueSheet(
+                    context,
+                    playbackState: ref.read(playbackControllerProvider),
+                    controller: controller,
+                  );
+                },
+              ),
             ],
           ),
         ),
@@ -138,7 +167,7 @@ class MiniPlayer extends ConsumerWidget {
     );
   }
 
-  Widget _buildCover(ThemeColors colors, Song song) {
+  Widget _buildCover(ThemeColors colors, Song song, double artSize) {
     // 优先使用 coverUrl（精准匹配后的在线封面），再回退到设备本地封面
     if (song.coverUrl != null && song.coverUrl!.isNotEmpty) {
       return MusicCoverImage(
@@ -149,19 +178,12 @@ class MiniPlayer extends ConsumerWidget {
       );
     }
     if (song.mediaStoreId != null) {
-      return QueryArtworkWidget(
-        // 用 song.id 做 key：唯一标识歌曲，播放/暂停等状态变更时
-        // key 不变，Flutter 复用 widget，避免封面图片重新加载闪烁。
-        key: ValueKey('mp_cover_${song.id}'),
-        id: song.mediaStoreId!,
-        type: ArtworkType.AUDIO,
-        keepOldArtwork: true,
-        artworkFit: BoxFit.cover,
-        nullArtworkWidget: Icon(
-          Icons.music_note,
-          size: 20,
-          color: colors.primary,
-        ),
+      return MusicCoverImage(
+        key: ValueKey('mp_cover_img_${song.id}'),
+        songId: song.id,
+        mediaStoreId: song.mediaStoreId,
+        fit: BoxFit.cover,
+        errorWidget: Icon(Icons.music_note, size: 20, color: colors.primary),
       );
     }
     return Icon(Icons.music_note, size: 20, color: colors.primary);
