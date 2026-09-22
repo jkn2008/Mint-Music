@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -14,6 +15,7 @@ import '../../../shared/widgets/share_preview_dialog.dart';
 import '../../../shared/widgets/music_cover_image.dart';
 import '../../../shared/widgets/song_action_sheet.dart';
 import '../../../shared/widgets/song_list_item.dart';
+import '../../../shared/widgets/song_selection.dart';
 import '../application/playlist_providers.dart';
 import '../domain/models/playlist.dart';
 import '../../player/application/playback_controller.dart';
@@ -46,10 +48,130 @@ class _LocalPlaylistDetailPageState
   bool _isCustomSortMode = false;
   final ScrollController _scrollController = ScrollController();
 
+  /// 批量选择控制器（长按歌曲或右上角菜单进入）。
+  final SongSelectionController _selection = SongSelectionController();
+
   @override
   void dispose() {
     _scrollController.dispose();
+    _selection.dispose();
     super.dispose();
+  }
+
+  // ---------------------------------------------------------------- 批量选择
+
+  /// 长按歌曲进入批量选择模式并选中该首。
+  void _enterSelection(Song song) {
+    if (_selection.isActive) {
+      _selection.toggle(song.id);
+    } else {
+      _selection.enter(song.id);
+    }
+  }
+
+  void _toggleMultiSelectMode() {
+    if (_selection.isActive) {
+      _selection.exit();
+    } else {
+      _selection.enter();
+    }
+  }
+
+  List<Song> _selectedSongs() => _selection.selectedSongs(_sortedSongs);
+
+  void _batchPlayNext() {
+    final selected = _selectedSongs();
+    if (selected.isEmpty) return;
+    ref.read(playbackControllerProvider.notifier).insertNext(selected);
+    _showMessage('已将 ${selected.length} 首插入到下一首播放');
+  }
+
+  void _batchAddToQueue() {
+    final selected = _selectedSongs();
+    if (selected.isEmpty) return;
+    ref.read(playbackControllerProvider.notifier).appendToQueue(selected);
+    _showMessage('已将 ${selected.length} 首加入播放列表');
+  }
+
+  void _batchAddToPlaylist() {
+    final selected = _selectedSongs();
+    if (selected.isEmpty) return;
+    final colors = ref.read(themeColorsProvider);
+    unawaited(showAddSongsToPlaylistSheet(context, ref, colors, selected));
+  }
+
+  void _batchDownload() {
+    final selected = _selectedSongs();
+    if (selected.isEmpty) return;
+    unawaited(showBatchDownloadSheet(context, ref, selected));
+  }
+
+  Future<void> _batchFavorite() async {
+    final selected = _selectedSongs();
+    if (selected.isEmpty) return;
+    await ref
+        .read(playlistsProvider.notifier)
+        .addSongsToPlaylist('__favorites__', selected);
+    if (mounted) _showMessage('已收藏 ${selected.length} 首');
+  }
+
+  /// 批量从歌单移除：一次性写盘（逐首 removeSongFromPlaylist 会写 N 次）。
+  Future<void> _confirmRemoveSelected(Playlist playlist) async {
+    final selected = _selectedSongs();
+    if (selected.isEmpty) return;
+    final colors = ref.read(themeColorsProvider);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      useRootNavigator: true,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: colors.surface,
+        title: Text(
+          context.tr('从歌单移除'),
+          style: TextStyle(color: colors.textPrimary),
+        ),
+        content: Text(
+          context.tr('确定要从歌单中移除选中的 ${selected.length} 首歌曲吗？'),
+          style: TextStyle(color: colors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(
+              context.tr('取消'),
+              style: TextStyle(color: colors.textHint),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              context.tr('移除'),
+              style: TextStyle(color: colors.error),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final ids = selected.map((s) => s.id).toSet();
+    // 按原始顺序过滤，避免把当前排序结果固化成歌单存储顺序。
+    final remaining = _originalSongs.where((s) => !ids.contains(s.id)).toList();
+    await ref
+        .read(playlistsProvider.notifier)
+        .updatePlaylist(playlist.copyWith(songs: remaining));
+    if (!mounted) return;
+    _selection.exit();
+    _showMessage('已从歌单移除 ${ids.length} 首歌曲');
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(context.tr(message)),
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   List<Song> _applySort(List<Song> songs) {
@@ -139,60 +261,108 @@ class _LocalPlaylistDetailPageState
     final colors = ref.watch(themeColorsProvider);
     final playlistsAsync = ref.watch(playlistsProvider);
 
-    return Scaffold(
-      backgroundColor: colors.background,
-      body: Stack(
-        children: [
-          Positioned.fill(
-            child: SafeArea(
-              child: playlistsAsync.when(
-                data: (playlists) {
-                  final playlist = playlists
-                      .where((p) => p.id == widget.playlistId)
-                      .firstOrNull;
-                  if (playlist == null) {
-                    return Center(
-                      child: Text(context.tr('歌单未找到'),
+    return ListenableBuilder(
+      listenable: _selection,
+      builder: (context, _) {
+        final selecting = _selection.isActive;
+        final currentPlaylist = _currentPlaylist(playlistsAsync);
+        return PopScope(
+          // 多选模式下先拦截返回键用于退出选择
+          canPop: !selecting,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) _selection.exit();
+          },
+          child: Scaffold(
+            backgroundColor: colors.background,
+            body: Stack(
+              children: [
+                Positioned.fill(
+                  child: SafeArea(
+                    child: playlistsAsync.when(
+                      data: (playlists) {
+                        final playlist = playlists
+                            .where((p) => p.id == widget.playlistId)
+                            .firstOrNull;
+                        if (playlist == null) {
+                          return Center(
+                            child: Text(context.tr('歌单未找到'),
+                                style: TextStyle(color: colors.textHint)),
+                          );
+                        }
+                        if (_originalSongs.length != playlist.songs.length ||
+                            !_listEquals(_originalSongs, playlist.songs)) {
+                          _updateSortedSongs(playlist.songs);
+                        }
+                        return Column(
+                          children: [
+                            _buildHeader(context, ref, colors, playlist),
+                            if (selecting)
+                              SongSelectionBar(
+                                colors: colors,
+                                controller: _selection,
+                                songs: _sortedSongs,
+                              )
+                            else if (_isCustomSortMode)
+                              _buildCustomSortBar(colors),
+                            Expanded(
+                              // 多选优先：避免「选择栏 + 可拖拽列表」同时生效
+                              child: _isCustomSortMode && !selecting
+                                  ? _buildReorderableSongList(ref, colors, playlist)
+                                  : _buildSongList(context, ref, colors, playlist),
+                            ),
+                          ],
+                        );
+                      },
+                      loading: () =>
+                          const Center(child: CircularProgressIndicator()),
+                      error: (_, __) => Center(
+                      child: Text(context.tr('加载失败'),
                           style: TextStyle(color: colors.textHint)),
-                    );
-                  }
-                  if (_originalSongs.length != playlist.songs.length ||
-                      !_listEquals(_originalSongs, playlist.songs)) {
-                    _updateSortedSongs(playlist.songs);
-                  }
-                  return Column(
-                    children: [
-                      _buildHeader(context, ref, colors, playlist),
-                      if (_isCustomSortMode) _buildCustomSortBar(colors),
-                      Expanded(
-                        child: _isCustomSortMode
-                            ? _buildReorderableSongList(ref, colors, playlist)
-                            : _buildSongList(context, ref, colors, playlist),
                       ),
-                    ],
-                  );
-                },
-                loading: () =>
-                    const Center(child: CircularProgressIndicator()),
-                error: (_, __) => Center(
-                child: Text(context.tr('加载失败'),
-                    style: TextStyle(color: colors.textHint)),
+                    ),
+                  ),
                 ),
-              ),
+                // 底部迷你播放器（与搜索页面一致：键盘弹出时隐藏）
+                MediaQuery.of(context).viewInsets.bottom > 0
+                    ? const SizedBox.shrink()
+                    : Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 20,
+                        child: RepaintBoundary(child: const MiniPlayer()),
+                      ),
+                if (selecting)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: AppSpacing.miniPlayerHeight + AppSpacing.xl,
+                    child: SongBatchActionBar(
+                      colors: colors,
+                      controller: _selection,
+                      onPlayNext: _batchPlayNext,
+                      onAddToQueue: _batchAddToQueue,
+                      onAddToPlaylist: _batchAddToPlaylist,
+                      onFavorite: _batchFavorite,
+                      onDownload: _batchDownload,
+                      onRemove: currentPlaylist == null
+                          ? null
+                          : () => _confirmRemoveSelected(currentPlaylist),
+                      removeLabel: '从歌单移除',
+                      removeIcon: Icons.remove_circle_outline,
+                    ),
+                  ),
+              ],
             ),
           ),
-          // 底部迷你播放器（与搜索页面一致：键盘弹出时隐藏）
-          MediaQuery.of(context).viewInsets.bottom > 0
-              ? const SizedBox.shrink()
-              : Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 20,
-                  child: RepaintBoundary(child: const MiniPlayer()),
-                ),
-        ],
-      ),
+        );
+      },
     );
+  }
+
+  Playlist? _currentPlaylist(AsyncValue<List<Playlist>> playlistsAsync) {
+    return playlistsAsync.valueOrNull
+        ?.where((p) => p.id == widget.playlistId)
+        .firstOrNull;
   }
 
   bool _listEquals(List<Song> a, List<Song> b) {
@@ -277,9 +447,26 @@ class _LocalPlaylistDetailPageState
                     _exportPlaylist(context, ref, colors, playlist);
                   } else if (value == 'edit') {
                     _editPlaylist(context, ref, colors, playlist);
+                  } else if (value == 'multiselect') {
+                    _toggleMultiSelectMode();
                   }
                 },
                 itemBuilder: (context) => [
+                  PopupMenuItem(
+                    value: 'multiselect',
+                    child: Row(
+                      children: [
+                        Icon(Icons.select_all, size: 18, color: colors.textSecondary),
+                        const SizedBox(width: 8),
+                        Text(
+                          context.tr(
+                            _selection.isActive ? '取消批量选择' : '批量选择',
+                          ),
+                          style: TextStyle(color: colors.textPrimary),
+                        ),
+                      ],
+                    ),
+                  ),
                   PopupMenuItem(
                     value: 'edit',
                     child: Text(context.tr('编辑歌单'),
@@ -751,20 +938,47 @@ class _LocalPlaylistDetailPageState
       );
     }
 
+    final selecting = _selection.isActive;
     return Stack(
       children: [
         ListView.builder(
           controller: _scrollController,
           // 预留迷你播放器高度（56px + 底部 20px 间距），保证最后一首歌曲
-          // 能滚动到迷你播放器上方而不被遮挡。
-          padding: const EdgeInsets.only(
-            bottom: AppSpacing.miniPlayerHeight + AppSpacing.xxxl,
+          // 能滚动到迷你播放器上方而不被遮挡；多选模式下还要避开批量操作栏。
+          padding: EdgeInsets.only(
+            bottom: AppSpacing.miniPlayerHeight +
+                AppSpacing.xxxl +
+                (selecting ? SongBatchActionBar.height : 0),
           ),
           itemCount: _sortedSongs.length,
       addAutomaticKeepAlives: false,
       addRepaintBoundaries: true,
       itemBuilder: (context, index) {
         final song = _sortedSongs[index];
+        // 高亮当前正在播放的歌曲，与本地音乐页面保持一致
+        final item = Builder(
+          builder: (context) {
+            final playbackState = ref.read(playbackControllerProvider);
+            final isPlaying = playbackState.currentSong?.id == song.id;
+            return SongListItem(
+              song: song,
+              index: index,
+              isPlaying: isPlaying,
+              selectionMode: selecting,
+              selected: _selection.isSelected(song.id),
+              onSelectionToggle: (s) => _selection.toggle(s.id),
+              // 长按进入批量选择模式
+              onLongPress: () => _enterSelection(song),
+              onPlayTap: () {
+                final controller = ref.read(playbackControllerProvider.notifier);
+                controller.setQueue(_sortedSongs, startIndex: index);
+              },
+              onMenuTap: () => SongActionSheet.show(context, song: song, playlistSongs: _sortedSongs),
+            );
+          },
+        );
+        // 多选模式下禁用右滑删除，避免与选择手势冲突
+        if (selecting) return item;
         return Dismissible(
           key: Key('${playlist.id}_${song.id}'),
           direction: DismissDirection.endToStart,
@@ -781,28 +995,12 @@ class _LocalPlaylistDetailPageState
               song.id,
             );
           },
-          // 高亮当前正在播放的歌曲，与本地音乐页面保持一致
-          child: Builder(
-            builder: (context) {
-              final playbackState = ref.read(playbackControllerProvider);
-              final isPlaying = playbackState.currentSong?.id == song.id;
-              return SongListItem(
-                song: song,
-                index: index,
-                isPlaying: isPlaying,
-                onPlayTap: () {
-                  final controller = ref.read(playbackControllerProvider.notifier);
-                  controller.setQueue(_sortedSongs, startIndex: index);
-                },
-                onMenuTap: () => SongActionSheet.show(context, song: song, playlistSongs: _sortedSongs),
-              );
-            },
-          ),
+          child: item,
         );
       },
         ),
         // 定位当前播放歌曲的悬浮按钮（右下角，避开底部迷你播放器）
-        _buildLocateFab(colors),
+        if (!selecting) _buildLocateFab(colors),
       ],
     );
   }

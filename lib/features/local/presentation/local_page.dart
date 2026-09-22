@@ -12,6 +12,7 @@ import '../../../core/utils/responsive_layout.dart';
 import '../../../core/constants/app_routes.dart';
 import '../../../shared/widgets/song_action_sheet.dart';
 import '../../../shared/widgets/music_cover_image.dart';
+import '../../../shared/widgets/song_selection.dart';
 import '../application/local_providers.dart';
 import '../data/local_music_repository.dart';
 import '../../player/application/playback_controller.dart';
@@ -30,6 +31,9 @@ class _LocalPageState extends ConsumerState<LocalPage> {
   final _searchController = TextEditingController();
   final _scrollController = ScrollController();
 
+  /// 批量选择控制器（长按歌曲进入多选模式）。
+  final _selection = SongSelectionController();
+
   @override
   void initState() {
     super.initState();
@@ -42,6 +46,7 @@ class _LocalPageState extends ConsumerState<LocalPage> {
   void dispose() {
     _searchController.dispose();
     _scrollController.dispose();
+    _selection.dispose();
     super.dispose();
   }
 
@@ -127,25 +132,72 @@ class _LocalPageState extends ConsumerState<LocalPage> {
         currentSong.source == 'local' &&
         songs.indexWhere((s) => s.id == currentSong.id) >= 0;
 
-    return Scaffold(
-      backgroundColor: colors.background,
-      body: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            _buildHeader(colors),
-            _buildControls(colors, songs, scanProgress),
-            const SizedBox(height: AppSpacing.sm),
-            Expanded(
-              child: songsAsync.when(
-                data: (_) => _buildSongList(colors, songs, showLocateBtn),
-                loading: () => const Center(child: CircularProgressIndicator()),
-                error: (e, _) => _buildErrorState(colors, e.toString()),
+    // 选择状态变化只影响「选择栏 + 列表勾选态 + 底部操作栏」，
+    // 用 ListenableBuilder 收窄重建范围。
+    return ListenableBuilder(
+      listenable: _selection,
+      builder: (context, _) {
+        final selecting = _selection.isActive;
+        return PopScope(
+          // 多选模式下先拦截返回键用于退出选择，而不是直接离开页面。
+          canPop: !selecting,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) _selection.exit();
+          },
+          child: Scaffold(
+            backgroundColor: colors.background,
+            body: SafeArea(
+              bottom: false,
+              child: Stack(
+                children: [
+                  Column(
+                    children: [
+                      _buildHeader(colors),
+                      if (selecting)
+                        // 多选模式：用选择栏替换常规控制区
+                        // （对应 CeruMusic 中列表列头被整行替换的设计）。
+                        SongSelectionBar(
+                          colors: colors,
+                          controller: _selection,
+                          songs: songs,
+                        )
+                      else ...[
+                        _buildControls(colors, songs, scanProgress),
+                        const SizedBox(height: AppSpacing.sm),
+                      ],
+                      Expanded(
+                        child: songsAsync.when(
+                          data: (_) => _buildSongList(colors, songs, showLocateBtn),
+                          loading: () =>
+                              const Center(child: CircularProgressIndicator()),
+                          error: (e, _) =>
+                              _buildErrorState(colors, e.toString()),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (selecting)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: AppSpacing.miniPlayerHeight,
+                      child: SongBatchActionBar(
+                        colors: colors,
+                        controller: _selection,
+                        onPlayNext: () => _batchPlayNext(songs),
+                        onAddToQueue: () => _batchAddToQueue(songs),
+                        onAddToPlaylist: () => _batchAddToPlaylist(songs),
+                        onFavorite: () => _batchFavorite(songs),
+                        onRemove: () => _confirmDeleteSelected(songs),
+                        removeLabel: '删除',
+                      ),
+                    ),
+                ],
               ),
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
@@ -329,30 +381,39 @@ class _LocalPageState extends ConsumerState<LocalPage> {
       return _buildEmptyState(colors);
     }
 
+    final selecting = _selection.isActive;
     return Stack(
       children: [
         ListView.separated(
           controller: _scrollController,
-          padding: const EdgeInsets.only(
+          padding: EdgeInsets.only(
             left: AppSpacing.lg,
             right: AppSpacing.lg,
-            // 底部多留出空间，避免最后一项被悬浮的迷你播放器遮挡
-            bottom: AppSpacing.xxxl + AppSpacing.huge,
+            // 底部多留出空间，避免最后一项被悬浮的迷你播放器遮挡；
+            // 多选模式下还要再避开底部批量操作栏。
+            bottom: AppSpacing.xxxl +
+                AppSpacing.huge +
+                (selecting ? SongBatchActionBar.height : 0),
           ),
           itemCount: songs.length,
           separatorBuilder: (_, __) => const SizedBox(height: 2),
           itemBuilder: (context, index) {
+            final song = songs[index];
             return _LocalSongItem(
-              key: ValueKey(songs[index].id),
-              song: songs[index],
+              key: ValueKey(song.id),
+              song: song,
               index: index,
               onPlay: _playSong,
               onContextMenu: _showSongContextMenu,
+              selectionMode: selecting,
+              selected: _selection.isSelected(song.id),
+              onSelectionToggle: (s) => _selection.toggle(s.id),
+              onLongPress: () => _enterSelection(song),
             );
           },
         ),
         // 定位当前播放歌曲的悬浮按钮（右下角，避开底部迷你播放器）
-        if (showLocateBtn)
+        if (showLocateBtn && !selecting)
           Positioned(
             right: AppSpacing.lg,
             bottom: AppSpacing.miniPlayerHeight + AppSpacing.xxl,
@@ -478,6 +539,106 @@ class _LocalPageState extends ConsumerState<LocalPage> {
         SnackBar(content: Text(context.tr('扫描完成')), duration: const Duration(seconds: 2)),
       );
     }
+  }
+
+  // ---------------------------------------------------------------- 批量选择
+
+  /// 长按歌曲进入批量选择模式，并选中该首（CeruMusic 里由菜单项进入，
+  /// 本项目按需要在长按处进入）。
+  void _enterSelection(Song song) {
+    if (_selection.isActive) {
+      _selection.toggle(song.id);
+    } else {
+      _selection.enter(song.id);
+    }
+  }
+
+  List<Song> _selectedSongs(List<Song> source) =>
+      _selection.selectedSongs(source);
+
+  void _batchPlayNext(List<Song> songs) {
+    final selected = _selectedSongs(songs);
+    if (selected.isEmpty) return;
+    ref.read(playbackControllerProvider.notifier).insertNext(selected);
+    _showMessage('已将 ${selected.length} 首插入到下一首播放');
+  }
+
+  void _batchAddToQueue(List<Song> songs) {
+    final selected = _selectedSongs(songs);
+    if (selected.isEmpty) return;
+    ref.read(playbackControllerProvider.notifier).appendToQueue(selected);
+    _showMessage('已将 ${selected.length} 首加入播放列表');
+  }
+
+  void _batchAddToPlaylist(List<Song> songs) {
+    final selected = _selectedSongs(songs);
+    if (selected.isEmpty) return;
+    final colors = ref.read(themeColorsProvider);
+    unawaited(showAddSongsToPlaylistSheet(context, ref, colors, selected));
+  }
+
+  Future<void> _batchFavorite(List<Song> songs) async {
+    final selected = _selectedSongs(songs);
+    if (selected.isEmpty) return;
+    await ref
+        .read(playlistsProvider.notifier)
+        .addSongsToPlaylist('__favorites__', selected);
+    if (mounted) _showMessage('已收藏 ${selected.length} 首');
+  }
+
+  Future<void> _confirmDeleteSelected(List<Song> songs) async {
+    final selected = _selectedSongs(songs);
+    if (selected.isEmpty) return;
+    final colors = ref.read(themeColorsProvider);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      useRootNavigator: true,
+      builder: (context) => AlertDialog(
+        backgroundColor: colors.surface,
+        title: Text(
+          context.tr('删除歌曲'),
+          style: TextStyle(color: colors.textPrimary),
+        ),
+        content: Text(
+          context.tr('确定要删除选中的 ${selected.length} 首歌曲吗？\n此操作将从本地音乐库移除这些歌曲。'),
+          style: TextStyle(color: colors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(
+              context.tr('取消'),
+              style: TextStyle(color: colors.textHint),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(
+              context.tr('删除'),
+              style: TextStyle(color: colors.error),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final removed = await ref
+        .read(localMusicNotifierProvider.notifier)
+        .deleteSongs(selected);
+    if (!mounted) return;
+    _selection.exit();
+    _showMessage('已删除 $removed 首歌曲');
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(context.tr(message)),
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   void _showSongContextMenu(ThemeColors colors, Song song) {
@@ -1401,12 +1562,22 @@ class _LocalSongItem extends ConsumerWidget {
     required this.index,
     required this.onPlay,
     required this.onContextMenu,
+    this.selectionMode = false,
+    this.selected = false,
+    this.onSelectionToggle,
+    this.onLongPress,
   });
 
   final Song song;
   final int index;
   final void Function(Song song) onPlay;
   final void Function(ThemeColors colors, Song song) onContextMenu;
+  final bool selectionMode;
+  final bool selected;
+  final void Function(Song song)? onSelectionToggle;
+
+  /// 长按回调：进入批量选择模式（菜单改由右侧 more_vert 按钮触发）。
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1415,30 +1586,43 @@ class _LocalSongItem extends ConsumerWidget {
     final isPlaying = playingId == song.id;
 
     return GestureDetector(
-      onTap: () => onPlay(song),
-      onLongPress: () => onContextMenu(colors, song),
+      onTap: selectionMode ? () => onSelectionToggle?.call(song) : () => onPlay(song),
+      onLongPress: selectionMode ? null : onLongPress,
       child: Container(
         padding: const EdgeInsets.all(AppSpacing.sm),
         decoration: BoxDecoration(
-          color: isPlaying ? colors.primary.withValues(alpha: 0.08) : Colors.transparent,
+          color: selected
+              ? colors.primary.withValues(alpha: 0.10)
+              : (isPlaying ? colors.primary.withValues(alpha: 0.08) : Colors.transparent),
           borderRadius: BorderRadius.circular(AppRadius.md),
         ),
         child: Row(
           children: [
-            // 序号
+            // 序号 / 勾选框
             SizedBox(
               width: 28,
-              child: isPlaying
-                  ? Icon(Icons.play_arrow, size: 18, color: colors.primary)
-                  : Text(
-                      '${index + 1}',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: colors.textHint,
-                        fontWeight: FontWeight.w500,
+              child: selectionMode
+                  ? IgnorePointer(
+                      // 只做展示：整行点击由外层 GestureDetector 处理
+                      child: Checkbox(
+                        value: selected,
+                        onChanged: (_) {},
+                        activeColor: colors.primary,
+                        visualDensity: VisualDensity.compact,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                       ),
-                    ),
+                    )
+                  : (isPlaying
+                        ? Icon(Icons.play_arrow, size: 18, color: colors.primary)
+                        : Text(
+                            '${index + 1}',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: colors.textHint,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          )),
             ),
             const SizedBox(width: AppSpacing.sm),
             Container(
@@ -1519,14 +1703,17 @@ class _LocalSongItem extends ConsumerWidget {
                 song.displayDuration,
                 style: TextStyle(fontSize: 12, color: colors.textHint),
               ),
-            const SizedBox(width: AppSpacing.xs),
-            GestureDetector(
-              onTap: () => onContextMenu(colors, song),
-              child: Padding(
-                padding: const EdgeInsets.all(4),
-                child: Icon(Icons.more_vert, size: 18, color: colors.textHint),
+            // 多选模式下隐藏「更多」按钮，避免与选择手势冲突
+            if (!selectionMode) ...[
+              const SizedBox(width: AppSpacing.xs),
+              GestureDetector(
+                onTap: () => onContextMenu(colors, song),
+                child: Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: Icon(Icons.more_vert, size: 18, color: colors.textHint),
+                ),
               ),
-            ),
+            ],
           ],
         ),
       ),

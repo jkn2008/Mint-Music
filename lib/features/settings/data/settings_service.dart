@@ -284,6 +284,12 @@ class SettingsService {
   Future<void> setFullScreenBgMode(String v) =>
       _prefs.setString('full_screen_bg_mode', v);
 
+  // -- desktop lyric (桌面歌词/悬浮歌词窗, JSON 配置) --
+  String getDesktopLyricSettings() =>
+      _prefs.getString('desktop_lyric_settings') ?? '';
+  Future<void> setDesktopLyricSettings(String v) =>
+      _prefs.setString('desktop_lyric_settings', v);
+
   // -- cache directory --
   Future<String> getCacheDir() async {
     final persisted = _prefs.getString('cache_dir');

@@ -8,14 +8,202 @@
 import { LyricPlayer, LayoutAlignAnchor, MaskObsceneWordsMode } from '@applemusic-like-lyrics/core'
 
 let player = null
+let restoreBlockedTouchListeners = null
+let pendingTimeAfterScroll = null
+
+function postToFlutter(detail) {
+  try {
+    if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+      window.flutter_inappwebview.callHandler('AmllChannel', JSON.stringify(detail))
+    }
+  } catch {}
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max)
+}
+
+function clampScrollState(state) {
+  const boundary = state.scrollBoundary || { minOffset: 0, maxOffset: 0 }
+  state.scrollOffset = clamp(
+    state.scrollOffset || 0,
+    boundary.minOffset || 0,
+    boundary.maxOffset || 0
+  )
+}
+
+function blockCoreTouchScrollListeners() {
+  const originalAddEventListener = EventTarget.prototype.addEventListener
+  EventTarget.prototype.addEventListener = function (type, listener, options) {
+    const isLyricElement =
+      this instanceof HTMLElement &&
+      this.classList &&
+      this.classList.contains('amll-lyric-player')
+    if (
+      isLyricElement &&
+      (type === 'touchstart' || type === 'touchmove' || type === 'touchend')
+    ) {
+      return
+    }
+    return originalAddEventListener.call(this, type, listener, options)
+  }
+  return function restore() {
+    EventTarget.prototype.addEventListener = originalAddEventListener
+  }
+}
+
+function installStableTouchScroll() {
+  if (!player) return
+  const element = player.getElement()
+  const state = player.scrollState
+  if (!element || !state || element.__mintStableTouchScrollInstalled) return
+  element.__mintStableTouchScrollInstalled = true
+
+  let startOffset = 0
+  let startX = 0
+  let startY = 0
+  let lastY = 0
+  let lastTime = 0
+  let velocity = 0
+  let flingToken = 0
+
+  function beginScroll() {
+    if (typeof player.beginScrollHandler === 'function') {
+      return player.beginScrollHandler()
+    }
+    return state.allowScroll !== false
+  }
+
+  function endScroll() {
+    state.isUserScrolling = false
+    if (typeof player.endScrollHandler === 'function') player.endScrollHandler()
+    postToFlutter({ type: 'interaction-end' })
+    if (pendingTimeAfterScroll !== null) {
+      const time = pendingTimeAfterScroll
+      pendingTimeAfterScroll = null
+      requestAnimationFrame(function () {
+        if (player && !player.scrollState?.isUserScrolling) {
+          player.setCurrentTime(time)
+        }
+      })
+    }
+  }
+
+  function relayout(useSpring) {
+    if (typeof player.calcLayout === 'function') {
+      player.calcLayout(true, useSpring)
+    }
+  }
+
+  function onTouchStart(event) {
+    if (event.touches.length !== 1 || !beginScroll()) return
+    event.preventDefault()
+    event.stopImmediatePropagation()
+
+    const touch = event.touches[0]
+    flingToken++
+    state.isUserScrolling = true
+    startOffset = state.scrollOffset || 0
+    startX = touch.clientX
+    startY = touch.clientY
+    lastY = startY
+    lastTime = performance.now()
+    velocity = 0
+    relayout(true)
+    postToFlutter({ type: 'interaction-start' })
+  }
+
+  function onTouchMove(event) {
+    if (!state.isUserScrolling || event.touches.length !== 1) return
+    event.preventDefault()
+    event.stopImmediatePropagation()
+
+    const touch = event.touches[0]
+    const y = touch.clientY
+    const dy = y - startY
+    state.scrollOffset = startOffset - dy
+    clampScrollState(state)
+
+    const now = performance.now()
+    const dt = Math.max(1, now - lastTime)
+    velocity = clamp((y - lastY) / dt, -1.15, 1.15)
+    lastY = y
+    lastTime = now
+    relayout(true)
+  }
+
+  function onTouchEnd(event) {
+    if (!state.isUserScrolling) return
+    event.preventDefault()
+    event.stopImmediatePropagation()
+
+    const touch = event.changedTouches[0]
+    const movedX = Math.abs(touch.clientX - startX)
+    const movedY = Math.abs(touch.clientY - startY)
+    if (movedX < 10 && movedY < 10) {
+      const target = document.elementFromPoint(touch.clientX, touch.clientY)
+      if (target instanceof HTMLElement && element.contains(target)) {
+        target.click()
+      }
+      endScroll()
+      return
+    }
+
+    const token = ++flingToken
+    let lastFrame = performance.now()
+    let currentVelocity = Math.abs(velocity) < 0.035 ? 0 : velocity
+
+    function step(now) {
+      if (token !== flingToken) return
+      const dt = Math.min(48, Math.max(1, now - lastFrame))
+      lastFrame = now
+
+      if (Math.abs(currentVelocity) <= 0.025) {
+        endScroll()
+        return
+      }
+
+      const before = state.scrollOffset
+      state.scrollOffset -= currentVelocity * dt
+      clampScrollState(state)
+      if (Math.abs(before - state.scrollOffset) < 0.1) {
+        currentVelocity = 0
+      } else {
+        currentVelocity *= Math.pow(0.90, dt / 16)
+      }
+      relayout(true)
+      requestAnimationFrame(step)
+    }
+
+    requestAnimationFrame(step)
+  }
+
+  element.addEventListener('touchstart', onTouchStart, { passive: false, capture: true })
+  element.addEventListener('touchmove', onTouchMove, { passive: false, capture: true })
+  element.addEventListener('touchend', onTouchEnd, { passive: false, capture: true })
+  element.addEventListener('touchcancel', function (event) {
+    if (!state.isUserScrolling) return
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    flingToken++
+    endScroll()
+  }, { passive: false, capture: true })
+}
 
 // == Initialization ==
 function initLyricPlayer(containerId) {
   const container = document.getElementById(containerId)
   if (!container) throw new Error('Container #' + containerId + ' not found')
 
-  player = new LyricPlayer()
+  restoreBlockedTouchListeners = blockCoreTouchScrollListeners()
+  try {
+    player = new LyricPlayer()
+  } finally {
+    restoreBlockedTouchListeners()
+    restoreBlockedTouchListeners = null
+  }
   container.appendChild(player.getElement())
+  installStableTouchScroll()
 
   // dispatch line-click events back to Flutter
   player.addEventListener('line-click', function (e) {
@@ -39,10 +227,7 @@ function initLyricPlayer(containerId) {
         lineIndex: e.lineIndex,
         startTime: startTime
       }
-      // flutter_inappwebview bridge
-      if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
-        window.flutter_inappwebview.callHandler('AmllChannel', JSON.stringify(detail))
-      }
+      postToFlutter(detail)
     } catch (ex) {
       console.warn('[AmllBridge] line-click handler error:', ex)
     }
@@ -52,11 +237,11 @@ function initLyricPlayer(containerId) {
 }
 
 // == Set lyric lines ==
-function setLyricLines(jsonStr) {
+function setLyricLines(jsonStr, initialTime = 0) {
   if (!player) return
   try {
     const lines = JSON.parse(jsonStr)
-    player.setLyricLines(lines)
+    player.setLyricLines(lines, initialTime)
   } catch (ex) {
     console.warn('[AmllBridge] setLyricLines error:', ex)
   }
@@ -67,6 +252,10 @@ let _lastTime = -1
 function setCurrentTime(ms) {
   if (!player) return
   _lastTime = ms
+  if (player.scrollState?.isUserScrolling) {
+    pendingTimeAfterScroll = ms
+    return
+  }
   player.setCurrentTime(ms)
 }
 
@@ -110,6 +299,9 @@ function setConfig(jsonStr) {
       if (cfg.fontWeight !== undefined) {
         el.style.fontWeight = String(cfg.fontWeight)
       }
+      if (cfg.centerAlign !== undefined) {
+        el.style.setProperty('--amll-lp-text-align', cfg.centerAlign ? 'center' : 'left')
+      }
     }
   } catch (ex) {
     console.warn('[AmllBridge] setConfig error:', ex)
@@ -118,6 +310,10 @@ function setConfig(jsonStr) {
 
 // == Dispose ==
 function dispose() {
+  if (restoreBlockedTouchListeners) {
+    restoreBlockedTouchListeners()
+    restoreBlockedTouchListeners = null
+  }
   if (player) {
     player.dispose()
     player = null

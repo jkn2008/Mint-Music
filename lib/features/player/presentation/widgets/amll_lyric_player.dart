@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
@@ -57,10 +58,16 @@ class AmllLyricPlayerState extends State<AmllLyricPlayer>
   late final Ticker _ticker;
   int _tickerSkip = 0;
   bool _timeUpdateInFlight = false;
+  bool _userScrollingLyrics = false;
+  int _suppressTimeUpdatesUntilMs = 0;
   bool _disposed = false;
   static String? _cachedHtml;
   bool _fontsInjected = false;
   Timer? _loadStopTimer;
+  Timer? _interactionSettleTimer;
+  static const Duration _interactionSettleDuration = Duration(
+    milliseconds: 1400,
+  );
 
   /// 在后台 isolate 中执行 base64 编码，避免阻塞 UI 线程
   /// （字体 12MB、JS bundle 363KB，直接编码会产生几十到几百毫秒的卡顿）。
@@ -88,8 +95,8 @@ class AmllLyricPlayerState extends State<AmllLyricPlayer>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{width:100%;height:100%;overflow:hidden;background:transparent}
-#player{width:100%;height:100%;visibility:hidden;--amll-lp-color:rgba(255,255,255,0.9);--amll-lp-font-size:calc(min(clamp(30px,2.5vw,50px),5vh));--amll-lp-hover-bg-color:rgba(255,255,255,0.08);--amll-lp-text-align:left;font-synthesis:weight style;text-align:var(--amll-lp-text-align)}
+html,body{width:100%;height:100%;overflow:hidden;background:transparent;overscroll-behavior:none}
+#player{width:100%;height:100%;visibility:hidden;--amll-lp-color:rgba(255,255,255,0.9);--amll-lp-font-size:calc(min(clamp(30px,2.5vw,50px),5vh));--amll-lp-hover-bg-color:rgba(255,255,255,0.08);--amll-lp-text-align:left;font-synthesis:weight style;text-align:var(--amll-lp-text-align);touch-action:pan-y;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;user-select:none;-webkit-user-select:none}
 #amll-ff{font-synthesis:weight style}
 $css
 </style>
@@ -102,6 +109,87 @@ try{eval(atob("$jsB64"))}catch(e){}
   if(typeof AmllBridge!=='undefined'&&AmllBridge.init){
     try{AmllBridge.init("player")}catch(e){}
   }
+})();
+(function(){
+  var bridge=window.AmllBridge;
+  if(!bridge||bridge.__mintInteractionGuardInstalled)return;
+  bridge.__mintInteractionGuardInstalled=true;
+  var rawSetCurrentTime=bridge.setCurrentTime.bind(bridge);
+  var player=document.getElementById('player');
+  var interacting=false;
+  var suppressUntil=0;
+  var pendingTime=null;
+  var flushTimer=0;
+  var settleMs=1400;
+  function now(){return performance.now();}
+  function blocked(){return interacting||now()<suppressUntil;}
+  function post(type){
+    try{
+      if(window.flutter_inappwebview&&window.flutter_inappwebview.callHandler){
+        window.flutter_inappwebview.callHandler('AmllChannel',JSON.stringify({type:type}));
+      }
+    }catch(e){}
+  }
+  function armFlush(){
+    if(flushTimer)clearTimeout(flushTimer);
+    var delay=Math.max(0,suppressUntil-now()+24);
+    flushTimer=setTimeout(function(){
+      flushTimer=0;
+      if(pendingTime!=null&&!blocked()){
+        var t=pendingTime;
+        pendingTime=null;
+        rawSetCurrentTime(t);
+      }
+    },delay);
+  }
+  function extendSuppression(){
+    suppressUntil=now()+settleMs;
+    armFlush();
+  }
+  function begin(){
+    if(!interacting){
+      interacting=true;
+      post('interaction-start');
+    }
+    extendSuppression();
+  }
+  function move(){
+    if(interacting)extendSuppression();
+  }
+  function end(){
+    if(interacting){
+      interacting=false;
+      post('interaction-end');
+    }
+    extendSuppression();
+  }
+  bridge.setCurrentTime=function(time,force){
+    var t=Number(time)||0;
+    if(!force&&blocked()){
+      pendingTime=t;
+      return false;
+    }
+    pendingTime=null;
+    rawSetCurrentTime(t);
+    return true;
+  };
+  bridge.flushPendingCurrentTime=function(){
+    if(pendingTime!=null){
+      var t=pendingTime;
+      pendingTime=null;
+      rawSetCurrentTime(t);
+    }
+  };
+  bridge.isUserInteracting=function(){return blocked();};
+  var target=player||document;
+  target.addEventListener('touchstart',begin,{passive:true,capture:true});
+  target.addEventListener('touchmove',move,{passive:true,capture:true});
+  window.addEventListener('touchend',end,{passive:true,capture:true});
+  window.addEventListener('touchcancel',end,{passive:true,capture:true});
+  target.addEventListener('pointerdown',begin,{passive:true,capture:true});
+  target.addEventListener('pointermove',move,{passive:true,capture:true});
+  window.addEventListener('pointerup',end,{passive:true,capture:true});
+  window.addEventListener('pointercancel',end,{passive:true,capture:true});
 })();
 </script>
 </body>
@@ -164,10 +252,42 @@ try{eval(atob("$jsB64"))}catch(e){}
           final d = jsonDecode(args[0] as String) as Map<String, dynamic>;
           if (d['type'] == 'line-click') {
             widget.onLineClick?.call(d['startTime'] as int? ?? 0);
+          } else if (d['type'] == 'interaction-start') {
+            _handleLyricInteractionStart();
+          } else if (d['type'] == 'interaction-end') {
+            _handleLyricInteractionEnd();
           }
         } catch (_) {}
       },
     );
+  }
+
+  void _handleLyricInteractionStart() {
+    if (_disposed) return;
+    _userScrollingLyrics = true;
+    _suppressTimeUpdatesUntilMs =
+        DateTime.now().millisecondsSinceEpoch +
+        _interactionSettleDuration.inMilliseconds;
+    _interactionSettleTimer?.cancel();
+  }
+
+  void _handleLyricInteractionEnd() {
+    if (_disposed) return;
+    _userScrollingLyrics = false;
+    _suppressTimeUpdatesUntilMs =
+        DateTime.now().millisecondsSinceEpoch +
+        _interactionSettleDuration.inMilliseconds;
+    _interactionSettleTimer?.cancel();
+    _interactionSettleTimer = Timer(_interactionSettleDuration, () {
+      if (!_disposed && widget.isActive) {
+        _sendCurrentTime(force: true);
+      }
+    });
+  }
+
+  bool get _shouldSuppressTimeUpdates {
+    if (_userScrollingLyrics) return true;
+    return DateTime.now().millisecondsSinceEpoch < _suppressTimeUpdatesUntilMs;
   }
 
   void _onLoadStop(InAppWebViewController c, WebUri? url) {
@@ -203,8 +323,18 @@ try{eval(atob("$jsB64"))}catch(e){}
     if (_disposed || !widget.isActive || !_ready || _controller == null) {
       return;
     }
+    if (_shouldSuppressTimeUpdates) return;
     _tickerSkip++;
     if (_tickerSkip % 3 != 0) return;
+    if (_timeUpdateInFlight) return;
+    _sendCurrentTime();
+  }
+
+  void _sendCurrentTime({bool force = false}) {
+    if (_disposed || !widget.isActive || !_ready || _controller == null) {
+      return;
+    }
+    if (!force && _shouldSuppressTimeUpdates) return;
     if (_timeUpdateInFlight) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     final smoothTimeMs = _anchorPositionMs + now - _anchorWallMs;
@@ -213,7 +343,8 @@ try{eval(atob("$jsB64"))}catch(e){}
     unawaited(
       controller
           .evaluateJavascript(
-            source: 'AmllBridge.setCurrentTime($smoothTimeMs)',
+            source:
+                'AmllBridge.setCurrentTime($smoothTimeMs${force ? ',true' : ''})',
           )
           .catchError((_) {})
           .whenComplete(() => _timeUpdateInFlight = false),
@@ -228,10 +359,7 @@ try{eval(atob("$jsB64"))}catch(e){}
     if (!_fontsInjected) {
       _fontsInjected = true;
       // 并发执行配置和字体注入，不互相依赖
-      await Future.wait([
-        _sendConfig(),
-        _injectFonts(),
-      ]);
+      await Future.wait([_sendConfig(), _injectFonts()]);
     } else {
       await _sendConfig();
     }
@@ -292,6 +420,9 @@ try{eval(atob("$jsB64"))}catch(e){}
     if (!active) {
       _ticker.stop();
       _tickerSkip = 0;
+      _interactionSettleTimer?.cancel();
+      _userScrollingLyrics = false;
+      _suppressTimeUpdatesUntilMs = 0;
     }
     final controller = _controller;
     if (controller == null) return;
@@ -513,8 +644,11 @@ try{eval(atob("$jsB64"))}catch(e){}
             : l.endTimeMs;
         var words = l.words
             .map(
-              (w) =>
-                  (word: w.word, startTime: w.startTimeMs, endTime: w.endTimeMs),
+              (w) => (
+                word: w.word,
+                startTime: w.startTimeMs,
+                endTime: w.endTimeMs,
+              ),
             )
             .toList();
         words.sort((a, b) => a.startTime.compareTo(b.startTime));
@@ -713,6 +847,7 @@ try{eval(atob("$jsB64"))}catch(e){}
   void dispose() {
     _disposed = true;
     _loadStopTimer?.cancel();
+    _interactionSettleTimer?.cancel();
     _ticker.dispose();
     // 不调用 evaluateJavascript，WebView 销毁时 JS 引擎自动清理
     super.dispose();
@@ -743,6 +878,9 @@ try{eval(atob("$jsB64"))}catch(e){}
       ),
       onWebViewCreated: _onWebViewCreated,
       onLoadStop: _onLoadStop,
+      gestureRecognizers: {
+        Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
+      },
     );
   }
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -7,6 +9,7 @@ import '../../../core/theme/theme_provider.dart';
 import '../../../shared/widgets/music_cover_image.dart';
 import '../../../shared/widgets/song_action_sheet.dart';
 import '../../../shared/widgets/song_list_item.dart';
+import '../../../shared/widgets/song_selection.dart';
 import '../application/discover_providers.dart';
 import '../../library/application/playlist_providers.dart';
 import '../../library/domain/models/playlist.dart' as local;
@@ -24,14 +27,15 @@ class PlaylistDetailPage extends ConsumerStatefulWidget {
 }
 
 class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
-  bool _isMultiSelectMode = false;
-  final Set<String> _selectedSongIds = {};
+  /// 批量选择控制器（长按歌曲或「更多」菜单进入）。
+  final SongSelectionController _selection = SongSelectionController();
   bool _isFavorited = false;
   final ScrollController _scrollController = ScrollController();
 
   @override
   void dispose() {
     _scrollController.dispose();
+    _selection.dispose();
     super.dispose();
   }
 
@@ -63,34 +67,73 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     });
   }
 
+  // ---------------------------------------------------------------- 批量选择
+
+  /// 长按歌曲进入批量选择模式并选中该首；已在选择模式则切换其选中态。
+  void _enterSelection(Song song) {
+    if (_selection.isActive) {
+      _selection.toggle(song.id);
+    } else {
+      _selection.enter(song.id);
+    }
+  }
+
+  /// 「更多」菜单里的「批量选择 / 取消批量选择」。
   void _toggleMultiSelectMode() {
-    setState(() {
-      _isMultiSelectMode = !_isMultiSelectMode;
-      if (!_isMultiSelectMode) {
-        _selectedSongIds.clear();
-      }
-    });
+    if (_selection.isActive) {
+      _selection.exit();
+    } else {
+      _selection.enter();
+    }
   }
 
-  void _toggleSongSelection(String songId) {
-    setState(() {
-      if (_selectedSongIds.contains(songId)) {
-        _selectedSongIds.remove(songId);
-      } else {
-        _selectedSongIds.add(songId);
-      }
-    });
+  List<Song> _selectedSongs(List<Song> source) =>
+      _selection.selectedSongs(source);
+
+  void _batchPlayNext(List<Song> songs) {
+    final selected = _selectedSongs(songs);
+    if (selected.isEmpty) return;
+    ref.read(playbackControllerProvider.notifier).insertNext(selected);
+    _showMessage('已将 ${selected.length} 首插入到下一首播放');
   }
 
-  void _selectAllSongs(List<Song> songs) {
-    setState(() {
-      if (_selectedSongIds.length == songs.length) {
-        _selectedSongIds.clear();
-      } else {
-        _selectedSongIds.clear();
-        _selectedSongIds.addAll(songs.map((s) => s.id));
-      }
-    });
+  void _batchAddToQueue(List<Song> songs) {
+    final selected = _selectedSongs(songs);
+    if (selected.isEmpty) return;
+    ref.read(playbackControllerProvider.notifier).appendToQueue(selected);
+    _showMessage('已将 ${selected.length} 首加入播放列表');
+  }
+
+  void _batchAddToPlaylist(List<Song> songs) {
+    final selected = _selectedSongs(songs);
+    if (selected.isEmpty) return;
+    final colors = ref.read(themeColorsProvider);
+    unawaited(showAddSongsToPlaylistSheet(context, ref, colors, selected));
+  }
+
+  Future<void> _batchFavorite(List<Song> songs) async {
+    final selected = _selectedSongs(songs);
+    if (selected.isEmpty) return;
+    await ref
+        .read(playlistsProvider.notifier)
+        .addSongsToPlaylist('__favorites__', selected);
+    if (mounted) _showMessage('已收藏 ${selected.length} 首');
+  }
+
+  void _batchDownload(List<Song> songs) {
+    final selected = _selectedSongs(songs);
+    if (selected.isEmpty) return;
+    unawaited(showBatchDownloadSheet(context, ref, selected));
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(context.tr(message)),
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   @override
@@ -108,47 +151,92 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       orElse: () => -1,
     );
 
-    return Scaffold(
-      backgroundColor: colors.background,
-      body: Stack(
-        children: [
-          Positioned.fill(
-            child: playlistAsync.when(
-              data: (playlist) {
-                if (playlist == null) {
-                  return Center(
-                    child: Text(context.tr('歌单未找到'), style: TextStyle(color: colors.textHint)),
-                  );
-                }
-                return Column(
-                  children: [
-                    _buildHeader(context, ref, colors, playlist),
-                    if (_isMultiSelectMode) _buildMultiSelectBar(colors, playlist.songs),
-                    Expanded(
-                      child: _buildSongList(ref, colors, playlist.songs),
+    return ListenableBuilder(
+      listenable: _selection,
+      builder: (context, _) {
+        final selecting = _selection.isActive;
+        final currentSongs = _currentSongs(playlistAsync);
+        return PopScope(
+          // 多选模式下先拦截返回键用于退出选择
+          canPop: !selecting,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) _selection.exit();
+          },
+          child: Scaffold(
+            backgroundColor: colors.background,
+            body: Stack(
+              children: [
+                Positioned.fill(
+                  child: playlistAsync.when(
+                    data: (playlist) {
+                      if (playlist == null) {
+                        return Center(
+                          child: Text(context.tr('歌单未找到'), style: TextStyle(color: colors.textHint)),
+                        );
+                      }
+                      return Column(
+                        children: [
+                          _buildHeader(context, ref, colors, playlist),
+                          if (selecting)
+                            SongSelectionBar(
+                              colors: colors,
+                              controller: _selection,
+                              songs: playlist.songs,
+                            ),
+                          Expanded(
+                            child: _buildSongList(ref, colors, playlist.songs),
+                          ),
+                        ],
+                      );
+                    },
+                    loading: () => const Center(child: CircularProgressIndicator()),
+                    error: (_, __) => Center(
+                      child: Text(context.tr('加载失败'), style: TextStyle(color: colors.textHint)),
                     ),
-                  ],
-                );
-              },
-              loading: () => const Center(child: CircularProgressIndicator()),
-              error: (_, __) => Center(
-                child: Text(context.tr('加载失败'), style: TextStyle(color: colors.textHint)),
-              ),
+                  ),
+                ),
+                // 底部迷你播放器（与搜索页面一致：键盘弹出时隐藏）
+                MediaQuery.of(context).viewInsets.bottom > 0
+                    ? const SizedBox.shrink()
+                    : Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 20,
+                        child: RepaintBoundary(child: const MiniPlayer()),
+                      ),
+                if (selecting)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: AppSpacing.miniPlayerHeight + AppSpacing.xl,
+                    child: SongBatchActionBar(
+                      colors: colors,
+                      controller: _selection,
+                      onPlayNext: () => _batchPlayNext(currentSongs),
+                      onAddToQueue: () => _batchAddToQueue(currentSongs),
+                      onAddToPlaylist: () => _batchAddToPlaylist(currentSongs),
+                      onFavorite: () => _batchFavorite(currentSongs),
+                      onDownload: () => _batchDownload(currentSongs),
+                    ),
+                  ),
+                // 定位当前播放歌曲的悬浮按钮：放在外层 Stack 中避免被裁剪
+                if (currentSongIndex >= 0 && !selecting)
+                  _buildLocateFab(colors, currentSongIndex),
+              ],
             ),
           ),
-          // 底部迷你播放器（与搜索页面一致：键盘弹出时隐藏）
-          MediaQuery.of(context).viewInsets.bottom > 0
-              ? const SizedBox.shrink()
-              : Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 20,
-                  child: RepaintBoundary(child: const MiniPlayer()),
-                ),
-          // 定位当前播放歌曲的悬浮按钮：放在外层 Stack 中避免被裁剪
-          if (currentSongIndex >= 0) _buildLocateFab(colors, currentSongIndex),
-        ],
-      ),
+        );
+      },
+    );
+  }
+
+  /// 当前歌单的歌曲列表（选择栏/操作栏需要它来计算已选歌曲）。
+  List<Song> _currentSongs(AsyncValue<dynamic> playlistAsync) {
+    return playlistAsync.maybeWhen(
+      data: (playlist) => playlist == null
+          ? const <Song>[]
+          : (playlist.songs as List<Song>),
+      orElse: () => const <Song>[],
     );
   }
 
@@ -312,38 +400,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     );
   }
 
-  Widget _buildMultiSelectBar(ThemeColors colors, List<Song> songs) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
-      decoration: BoxDecoration(
-        color: colors.surface,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.05),
-            blurRadius: 4,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Text(
-            context.tr('已选择 ${_selectedSongIds.length} 首'),
-            style: TextStyle(fontSize: 14, color: colors.textPrimary),
-          ),
-          const Spacer(),
-          TextButton(
-            onPressed: () => _selectAllSongs(songs),
-            child: Text(
-              context.tr(_selectedSongIds.length == songs.length ? '取消全选' : '全选'),
-              style: TextStyle(color: colors.primary),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildSongList(WidgetRef ref, ThemeColors colors, List<Song> songs) {
     if (songs.isEmpty) {
       return Center(
@@ -351,23 +407,21 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
       );
     }
 
+    final selecting = _selection.isActive;
     return ListView.builder(
       controller: _scrollController,
       // 预留迷你播放器高度（56px + 底部 20px 间距），保证最后一首歌曲
-      // 能滚动到迷你播放器上方而不被遮挡。
-      padding: const EdgeInsets.only(
-        bottom: AppSpacing.miniPlayerHeight + AppSpacing.lg,
+      // 能滚动到迷你播放器上方而不被遮挡；多选模式下还要避开批量操作栏。
+      padding: EdgeInsets.only(
+        bottom: AppSpacing.miniPlayerHeight +
+            AppSpacing.lg +
+            (selecting ? SongBatchActionBar.height : 0),
       ),
       itemCount: songs.length,
       addAutomaticKeepAlives: false,
       addRepaintBoundaries: true,
       itemBuilder: (context, index) {
         final song = songs[index];
-        final isSelected = _selectedSongIds.contains(song.id);
-
-        if (_isMultiSelectMode) {
-          return _buildMultiSelectItem(colors, song, isSelected, songs);
-        }
 
         // 高亮当前正在播放的歌曲，与本地音乐页面保持一致
         final currentSongId = ref
@@ -380,6 +434,11 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
           song: song,
           index: index,
           isPlaying: isPlaying,
+          selectionMode: selecting,
+          selected: _selection.isSelected(song.id),
+          onSelectionToggle: (s) => _selection.toggle(s.id),
+          // 长按进入批量选择模式
+          onLongPress: () => _enterSelection(song),
           onPlayTap: () async {
             final controller = ref.read(playbackControllerProvider.notifier);
             await controller.setQueue(songs, startIndex: index);
@@ -434,49 +493,6 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
     );
   }
 
-  Widget _buildMultiSelectItem(ThemeColors colors, Song song, bool isSelected, List<Song> allSongs) {
-    return ListTile(
-      leading: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Checkbox(
-            value: isSelected,
-            onChanged: (_) => _toggleSongSelection(song.id),
-            activeColor: colors.primary,
-          ),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(AppRadius.sm),
-            child: MusicCoverImage(
-              url: song.coverUrl,
-              width: 44,
-              height: 44,
-              fit: BoxFit.cover,
-              errorWidget: Container(
-                width: 44,
-                height: 44,
-                color: colors.surfaceVariant,
-                child: Icon(Icons.music_note, size: 20, color: colors.primary),
-              ),
-            ),
-          ),
-        ],
-      ),
-      title: Text(
-        song.title,
-        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: colors.textPrimary),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-      subtitle: Text(
-        '${song.artist} - ${song.album}',
-        style: TextStyle(fontSize: 12, color: colors.textHint),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-      onTap: () => _toggleSongSelection(song.id),
-    );
-  }
-
   void _showMoreActions(BuildContext context, ThemeColors colors, playlist) {
     final bottomPadding = MediaQuery.of(context).padding.bottom;
     showModalBottomSheet(
@@ -507,7 +523,7 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
                 _buildMenuItem(
                   colors,
                   icon: Icons.select_all,
-                  label: context.tr(_isMultiSelectMode ? '取消批量选择' : '批量选择'),
+                  label: context.tr(_selection.isActive ? '取消批量选择' : '批量选择'),
                   onTap: () {
                     Navigator.pop(ctx);
                     _toggleMultiSelectMode();

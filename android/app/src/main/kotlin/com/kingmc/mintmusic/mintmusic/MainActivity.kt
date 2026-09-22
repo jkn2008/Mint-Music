@@ -18,10 +18,19 @@ import io.flutter.plugin.common.MethodCall
 import com.ryanheise.audioservice.AudioServiceActivity
 import java.io.File
 
+/**
+ * 音效链路按立体声建链：音乐播放流是立体声，效果引擎的声道数必须与之一致，
+ * 否则 AudioFlinger 会在链路中插入声道数转换。
+ */
+private const val kEffectChannelCount = 2
+
+private const val AUDIO_EFFECTS_TAG = "MintAudioEffects"
+
 class MainActivity : AudioServiceActivity() {
     private val MEDIA_CHANNEL = "com.mintmusic/media"
     private val TAG_WRITER_CHANNEL = "com.mintmusic/tag_writer"
     private val AUDIO_EFFECTS_CHANNEL = "com.mintmusic/audio_effects"
+    private val DESKTOP_LYRIC_CHANNEL = "com.mintmusic/desktop_lyric"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -61,6 +70,13 @@ class MainActivity : AudioServiceActivity() {
             .setMethodCallHandler(audioEffectsHandler)
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, "$AUDIO_EFFECTS_CHANNEL/visualizer")
             .setStreamHandler(audioEffectsHandler)
+
+        // 桌面歌词(系统级悬浮窗)
+        val desktopLyricChannel =
+            MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DESKTOP_LYRIC_CHANNEL)
+        val desktopLyricHandler = DesktopLyricOverlayHandler(this)
+        desktopLyricHandler.attachChannel(desktopLyricChannel)
+        desktopLyricChannel.setMethodCallHandler(desktopLyricHandler)
     }
 
     private inner class AudioEffectsHandler : MethodChannel.MethodCallHandler,
@@ -82,10 +98,15 @@ class MainActivity : AudioServiceActivity() {
         // stages the engine architecture already enabled at construction time,
         // so the transparent config must be passed in the constructor. Balance
         // only adjusts per-channel input gain (millibels, dB * 100).
+        //
+        // 声道数必须与播放流一致（音乐是立体声）。之前写死为 1 会让
+        // DynamicsProcessing 引擎按单声道建链，AudioFlinger 需要在链路里做
+        // 单声道 <-> 立体声转换；部分机型（小米 15 Pro）的转换实现会引入
+        // 底噪/电流声，且声道数只有 1 时右声道增益永远写不进去（向右平衡无效）。
         private val transparentDpConfig: DynamicsProcessing.Config by lazy {
             DynamicsProcessing.Config.Builder(
                 DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
-                1, // replicated to the real channel count by the constructor
+                kEffectChannelCount,
                 false, 0, // pre-EQ off
                 false, 0, // MBC off
                 false, 0, // post-EQ off
@@ -197,27 +218,37 @@ class MainActivity : AudioServiceActivity() {
             }
         }
 
+        // 音效开关的原则（与 Mio-Music / CeruMusic 一致）：
+        //   实例在一个 audio session 内只创建一次并常驻，开关只改参数。
+        // 在正在播放的链路上新建或释放一个效果，会让 audio HAL 重新配置整条
+        // 效果链，表现为"一瞬间声音突然增大"的爆音。所以：
+        //   - 关闭 = 强度/增益归零，实例保留；
+        //   - 只有 session 变化或发生异常时才 release（见 releaseEffects）。
         private fun applySurround(call: MethodCall, id: Int, master: Boolean) {
             val enabled = master && call.argument<Boolean>("surroundEnabled") == true
+
+            // The reference players mix a reverb wet signal on top of the dry one
+            // and never raise the overall level; very high Virtualizer strengths
+            // are known to push loudness/clipping on many devices, so the
+            // strengths are capped lower.
+            val strength = when (call.argument<String>("surroundMode")) {
+                "large" -> 700
+                "medium" -> 500
+                else -> 300
+            }
             try {
+                // "Off" is strength 0 on the same instance, never a bypass.
                 val surround = virtualizer ?: if (enabled) {
                     Virtualizer(0, id).also { virtualizer = it }
                 } else return
                 if (surround.strengthSupported) {
-                    // "Off" is strength 0 on the same instance, never a bypass.
-                    // The reference players mix a reverb wet signal on top of
-                    // the dry one and never raise the overall level; very high
-                    // Virtualizer strengths are known to push loudness/clipping
-                    // on many devices, so the strengths are capped lower.
-                    val strength = when {
-                        !enabled -> 0
-                        call.argument<String>("surroundMode") == "large" -> 700
-                        call.argument<String>("surroundMode") == "medium" -> 500
-                        else -> 300
-                    }
-                    surround.setStrength(strength.toShort())
+                    surround.setStrength((if (enabled) strength else 0).toShort())
                 }
                 surround.enabled = true
+                android.util.Log.d(
+                    AUDIO_EFFECTS_TAG,
+                    "virtualizer applied enabled=$enabled strength=${if (enabled) strength else 0}",
+                )
             } catch (_: Throwable) {
                 release(virtualizer)
                 virtualizer = null
@@ -225,14 +256,16 @@ class MainActivity : AudioServiceActivity() {
         }
 
         private fun applyBalance(call: MethodCall, id: Int, master: Boolean) {
+            val value = (call.argument<Number>("balance")?.toDouble() ?: 0.0)
+                .coerceIn(-1.0, 1.0)
             val enabled = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P &&
                 master && call.argument<Boolean>("balanceEnabled") == true
+
             try {
-                val dp = balance ?: if (enabled) {
+                // 同样只在首次开启时建链；关闭或居中都只把增益写回 0dB。
+                val dp = balance ?: if (enabled && value != 0.0) {
                     DynamicsProcessing(0, id, transparentDpConfig).also { balance = it }
                 } else return
-                val value = (call.argument<Number>("balance")?.toDouble() ?: 0.0)
-                    .coerceIn(-1.0, 1.0)
                 // Same semantics as the reference player: only the opposite
                 // channel is attenuated (never boosted). "Off" is 0dB on both
                 // channels of the same instance. The gain unit is millibels,
@@ -247,6 +280,11 @@ class MainActivity : AudioServiceActivity() {
                     dp.setInputGainbyChannel(1, (rightDb * 100.0).toFloat())
                 }
                 dp.enabled = true
+                android.util.Log.d(
+                    AUDIO_EFFECTS_TAG,
+                    "dynamicsProcessing applied channels=$channels " +
+                        "leftDb=$leftDb rightDb=$rightDb",
+                )
             } catch (_: Throwable) {
                 release(balance)
                 balance = null

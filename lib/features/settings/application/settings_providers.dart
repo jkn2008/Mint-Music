@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/l10n/app_locale.dart';
 import '../../../core/l10n/l10n.dart';
 import '../../../core/theme/theme_provider.dart';
+import '../../player/domain/models/desktop_lyric_settings.dart';
 import '../data/settings_service.dart';
 
 final settingsServiceProvider = FutureProvider<SettingsService>((ref) async {
@@ -171,6 +172,13 @@ final lyricFontColorProvider = StateProvider<String>((ref) => '');
 final appearanceJumpLyricProvider = StateProvider<bool>((ref) => true);
 final appearanceBgAnimationProvider = StateProvider<bool>((ref) => true);
 
+/// 桌面歌词(悬浮歌词窗)的完整配置。
+///
+/// 整体作为一个对象持久化(见 [SettingsService.setDesktopLyricSettings]),
+/// 避免为每个子项各建一个 provider 与 prefs key。
+final desktopLyricSettingsProvider =
+    StateProvider<DesktopLyricSettings>((ref) => DesktopLyricSettings.defaults);
+
 // -- auto cache music --
 final autoCacheMusicProvider = StateProvider<bool>((ref) => true);
 
@@ -221,7 +229,7 @@ final fullScreenBackgroundModeProvider =
 
 // -- app version (loaded once) --
 final appVersionProvider = FutureProvider<String>((ref) async {
-  return '1.0.6';
+  return '1.0.7';
 });
 
 class EqPreset {
@@ -345,6 +353,8 @@ final settingsInitProvider = FutureProvider<void>((ref) async {
       .getAppearanceJumpLyric();
   ref.read(appearanceBgAnimationProvider.notifier).state = svc
       .getAppearanceBgAnimation();
+  ref.read(desktopLyricSettingsProvider.notifier).state =
+      DesktopLyricSettings.decode(svc.getDesktopLyricSettings());
   ref.read(autoCacheMusicProvider.notifier).state = svc.getAutoCacheMusic();
   ref.read(routePreloadEnabledProvider.notifier).state = svc
       .getRoutePreloadEnabled();

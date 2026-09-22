@@ -20,6 +20,9 @@ import '../application/update_providers.dart';
 import '../data/settings_service.dart';
 import '../data/update_service.dart';
 import 'update_dialog.dart';
+import '../../player/application/desktop_lyric_controller.dart';
+import '../../player/application/desktop_lyric_sync.dart';
+import '../../player/domain/models/desktop_lyric_settings.dart';
 import '../../player/presentation/widgets/amll_lyric_player.dart';
 
 const _settingsSheetAnimationStyle = AnimationStyle(
@@ -535,6 +538,7 @@ class _AppearanceContent extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _buildThemeGroup(context, ref, colors),
+        _buildDesktopLyricGroup(context, ref, colors),
         _buildBackgroundModeGroup(context, ref, colors),
         _buildPerformanceGroup(context, ref, colors),
       ],
@@ -932,6 +936,508 @@ class _AppearanceContent extends ConsumerWidget {
       ],
     );
   }
+
+  Widget _buildDesktopLyricGroup(
+    BuildContext context,
+    WidgetRef ref,
+    ThemeColors colors,
+  ) {
+    final s = ref.watch(desktopLyricSettingsProvider);
+    final status = ref.watch(desktopLyricSyncProvider);
+    final needPermission = status.supported && !status.permissionGranted;
+
+    void update(DesktopLyricSettings Function(DesktopLyricSettings) fn) =>
+        updateDesktopLyricSettings(ref.read, fn);
+
+    final alignXLabel = switch (s.textAlignX) {
+      DesktopLyricTextAlignX.left => '左对齐',
+      DesktopLyricTextAlignX.center => '居中',
+      DesktopLyricTextAlignX.right => '右对齐',
+    };
+    final alignYLabel = switch (s.textAlignY) {
+      DesktopLyricTextAlignY.top => '顶部',
+      DesktopLyricTextAlignY.center => '居中',
+      DesktopLyricTextAlignY.bottom => '底部',
+    };
+
+    return _SettingGroup(
+      title: '桌面歌词',
+      subtitle: '悬浮在页面之上的歌词窗，可拖动位置，锁定后点击穿透',
+      colors: colors,
+      children: [
+        _SettingRow(
+          icon: Icons.lyrics,
+          title: '启用桌面歌词',
+          subtitle: needPermission
+              ? '需要「在其他应用上层显示」权限，开启时会跳转到授权页'
+              : '开启后歌词窗悬浮在其它应用之上，可拖动，锁定后点击穿透',
+          trailing: Switch(
+            // 未拿到悬浮窗权限时保持关闭:授权成功后才自动置为开启。
+            value: s.enable,
+            onChanged: (v) {
+              final sync = ref.read(desktopLyricSyncProvider.notifier);
+              if (v) {
+                unawaited(sync.enableDesktopLyric());
+              } else {
+                unawaited(sync.disableDesktopLyric());
+              }
+            },
+            activeTrackColor: colors.primary.withValues(alpha: 0.3),
+            activeThumbColor: colors.primary,
+          ),
+          colors: colors,
+        ),
+        _SettingDivider(colors: colors),
+        _SettingRow(
+          icon: s.isLock ? Icons.lock : Icons.lock_open,
+          title: '锁定歌词窗',
+          subtitle: '锁定后不再响应触摸，可穿透点击下层内容',
+          trailing: Switch(
+            value: s.isLock,
+            onChanged: (v) => update((cur) => cur.copyWith(isLock: v)),
+            activeTrackColor: colors.primary.withValues(alpha: 0.3),
+            activeThumbColor: colors.primary,
+          ),
+          colors: colors,
+        ),
+        _SettingDivider(colors: colors),
+        _SettingRow(
+          icon: Icons.short_text,
+          title: '单行显示',
+          subtitle: '只显示当前行，文字超长时横向滚动',
+          trailing: Switch(
+            value: s.isSingleLine,
+            onChanged: (v) => update((cur) => cur.copyWith(isSingleLine: v)),
+            activeTrackColor: colors.primary.withValues(alpha: 0.3),
+            activeThumbColor: colors.primary,
+          ),
+          colors: colors,
+        ),
+        _SettingDivider(colors: colors),
+        _SettingRow(
+          icon: Icons.animation,
+          title: '歌词切换动画',
+          subtitle: '切换歌词时的淡入淡出效果',
+          trailing: Switch(
+            value: s.showToggleAnima,
+            onChanged: (v) => update((cur) => cur.copyWith(showToggleAnima: v)),
+            activeTrackColor: colors.primary.withValues(alpha: 0.3),
+            activeThumbColor: colors.primary,
+          ),
+          colors: colors,
+        ),
+        _SettingDivider(colors: colors),
+        _SettingSlider(
+          icon: Icons.width_normal,
+          title: '窗口宽度',
+          subtitle: '歌词窗宽度占屏幕宽度的比例',
+          value: s.widthPercent.toDouble(),
+          min: 10,
+          max: 100,
+          divisions: 18,
+          valueLabel: '${s.widthPercent}%',
+          colors: colors,
+          onChanged: (v) =>
+              update((cur) => cur.copyWith(widthPercent: v.round())),
+        ),
+        _SettingDivider(colors: colors),
+        _SettingSlider(
+          icon: Icons.format_list_numbered,
+          title: '显示行数',
+          subtitle: '最多同时显示的行数（单行模式下无效）',
+          value: s.maxLineNum.toDouble(),
+          min: 1,
+          max: 8,
+          divisions: 7,
+          valueLabel: '${s.maxLineNum} 行',
+          colors: colors,
+          onChanged: (v) => update((cur) => cur.copyWith(maxLineNum: v.round())),
+        ),
+        _SettingDivider(colors: colors),
+        _SettingSlider(
+          icon: Icons.format_size,
+          title: '字体大小',
+          value: s.fontSize,
+          min: 12,
+          max: 40,
+          divisions: 28,
+          valueLabel: '${s.fontSize.round()}',
+          colors: colors,
+          onChanged: (v) => update((cur) => cur.copyWith(fontSize: v)),
+        ),
+        _SettingDivider(colors: colors),
+        _SettingSlider(
+          icon: Icons.opacity,
+          title: '不透明度',
+          value: s.opacityPercent.toDouble(),
+          min: 10,
+          max: 100,
+          divisions: 18,
+          valueLabel: '${s.opacityPercent}%',
+          colors: colors,
+          onChanged: (v) =>
+              update((cur) => cur.copyWith(opacityPercent: v.round())),
+        ),
+        _SettingDivider(colors: colors),
+        _SettingRow(
+          icon: Icons.format_align_left,
+          title: '水平对齐',
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                context.tr(alignXLabel),
+                style: TextStyle(fontSize: 13, color: colors.textHint),
+              ),
+              const SizedBox(width: 4),
+              Icon(Icons.chevron_right, size: 18, color: colors.textHint),
+            ],
+          ),
+          colors: colors,
+          onTap: () => _showBottomPicker(
+            context,
+            colors,
+            '水平对齐',
+            ['左对齐', '居中', '右对齐'],
+            alignXLabel,
+            (v) => update(
+              (cur) => cur.copyWith(
+                textAlignX: v == '居中'
+                    ? DesktopLyricTextAlignX.center
+                    : (v == '右对齐'
+                          ? DesktopLyricTextAlignX.right
+                          : DesktopLyricTextAlignX.left),
+              ),
+            ),
+          ),
+        ),
+        _SettingDivider(colors: colors),
+        _SettingRow(
+          icon: Icons.vertical_align_top,
+          title: '垂直对齐',
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                context.tr(alignYLabel),
+                style: TextStyle(fontSize: 13, color: colors.textHint),
+              ),
+              const SizedBox(width: 4),
+              Icon(Icons.chevron_right, size: 18, color: colors.textHint),
+            ],
+          ),
+          colors: colors,
+          onTap: () => _showBottomPicker(
+            context,
+            colors,
+            '垂直对齐',
+            ['顶部', '居中', '底部'],
+            alignYLabel,
+            (v) => update(
+              (cur) => cur.copyWith(
+                textAlignY: v == '居中'
+                    ? DesktopLyricTextAlignY.center
+                    : (v == '底部'
+                          ? DesktopLyricTextAlignY.bottom
+                          : DesktopLyricTextAlignY.top),
+              ),
+            ),
+          ),
+        ),
+        _SettingDivider(colors: colors),
+        _SettingRow(
+          icon: Icons.colorize,
+          title: '已播放颜色',
+          subtitle: '当前歌词行的颜色',
+          trailing: _colorSwatch(s.playedColor, colors),
+          colors: colors,
+          onTap: () => _showDesktopLyricColorPicker(
+            context,
+            colors,
+            '已播放颜色',
+            _lyricColorPresets,
+            s.playedColor,
+            (v) => update((cur) => cur.copyWith(playedColor: v)),
+          ),
+        ),
+        _SettingDivider(colors: colors),
+        _SettingRow(
+          icon: Icons.text_fields,
+          title: '未播放颜色',
+          subtitle: '非当前歌词行的颜色',
+          trailing: _colorSwatch(s.unplayColor, colors),
+          colors: colors,
+          onTap: () => _showDesktopLyricColorPicker(
+            context,
+            colors,
+            '未播放颜色',
+            _lyricColorPresets,
+            s.unplayColor,
+            (v) => update((cur) => cur.copyWith(unplayColor: v)),
+          ),
+        ),
+        _SettingDivider(colors: colors),
+        _SettingRow(
+          icon: Icons.blur_on,
+          title: '阴影颜色',
+          subtitle: '歌词描边阴影，增强在浅色背景上的可读性',
+          trailing: _colorSwatch(s.shadowColor, colors),
+          colors: colors,
+          onTap: () => _showDesktopLyricColorPicker(
+            context,
+            colors,
+            '阴影颜色',
+            _shadowColorPresets,
+            s.shadowColor,
+            (v) => update((cur) => cur.copyWith(shadowColor: v)),
+          ),
+        ),
+        _SettingDivider(colors: colors),
+        _SettingRow(
+          icon: Icons.my_location,
+          title: '重置歌词窗位置',
+          subtitle: '将歌词窗恢复到默认的左上角位置',
+          trailing: Icon(Icons.refresh, size: 18, color: colors.textHint),
+          colors: colors,
+          onTap: () => update(
+            (cur) => cur.copyWith(
+              positionX: DesktopLyricSettings.defaults.positionX,
+              positionY: DesktopLyricSettings.defaults.positionY,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 带标题、数值与滑块的设置行（滑块独占一行，避免与右侧文字挤在一起）。
+class _SettingSlider extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final double value;
+  final double min;
+  final double max;
+  final int? divisions;
+  final String valueLabel;
+  final ValueChanged<double> onChanged;
+  final ThemeColors colors;
+
+  const _SettingSlider({
+    required this.icon,
+    required this.title,
+    this.subtitle,
+    required this.value,
+    required this.min,
+    required this.max,
+    this.divisions,
+    required this.valueLabel,
+    required this.onChanged,
+    required this.colors,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 20, color: colors.textSecondary),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      context.tr(title),
+                      style: TextStyle(fontSize: 14, color: colors.textPrimary),
+                    ),
+                    if (subtitle != null)
+                      Text(
+                        context.tr(subtitle!),
+                        style: TextStyle(fontSize: 12, color: colors.textHint),
+                      ),
+                  ],
+                ),
+              ),
+              Text(
+                valueLabel,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: colors.primary,
+                ),
+              ),
+            ],
+          ),
+          Slider(
+            value: value.clamp(min, max),
+            min: min,
+            max: max,
+            divisions: divisions,
+            onChanged: onChanged,
+            activeColor: colors.primary,
+            inactiveColor: colors.divider,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 桌面歌词可用的歌词颜色预设。
+const _lyricColorPresets = <(String, int)>[
+  ('经典绿', 0xFF07C556),
+  ('薄荷绿', 0xFF1DB954),
+  ('天蓝', 0xFF3B82F6),
+  ('靛蓝', 0xFF6366F1),
+  ('粉红', 0xFFEC4899),
+  ('红色', 0xFFEF4444),
+  ('琥珀', 0xFFF59E0B),
+  ('紫色', 0xFF8B5CF6),
+  ('白色', 0xFFFFFFFF),
+  ('浅灰', 0xFFBDBDBD),
+];
+
+/// 桌面歌词可用的阴影颜色预设（含透明度）。
+const _shadowColorPresets = <(String, int)>[
+  ('无阴影', 0x00000000),
+  ('淡阴影', 0x66000000),
+  ('标准阴影', 0x99000000),
+  ('浓阴影', 0xCC000000),
+  ('白色描边', 0x99FFFFFF),
+  ('主题蓝', 0x993B82F6),
+];
+
+Widget _colorSwatch(int argb, ThemeColors colors) {
+  final color = Color(argb);
+  final isInvisible = (argb & 0xFF000000) == 0;
+  return Container(
+    width: 24,
+    height: 24,
+    decoration: BoxDecoration(
+      shape: BoxShape.circle,
+      color: isInvisible ? colors.surfaceVariant : color,
+      border: Border.all(color: colors.divider, width: 1.5),
+    ),
+    child: isInvisible
+        ? Icon(Icons.block, size: 14, color: colors.textHint)
+        : null,
+  );
+}
+
+void _showDesktopLyricColorPicker(
+  BuildContext context,
+  ThemeColors colors,
+  String title,
+  List<(String, int)> presets,
+  int currentArgb,
+  ValueChanged<int> onSelected,
+) {
+  showModalBottomSheet(
+    context: context,
+    sheetAnimationStyle: _settingsSheetAnimationStyle,
+    backgroundColor: colors.surface,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+    ),
+    builder: (context) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.lg),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: colors.divider,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: AppSpacing.md),
+            Text(
+              context.tr(title),
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: colors.textPrimary,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.md),
+            Wrap(
+              spacing: 16,
+              runSpacing: 16,
+              children: presets.map((item) {
+                final isSelected = item.$2 == currentArgb;
+                final color = Color(item.$2);
+                return GestureDetector(
+                  onTap: () {
+                    onSelected(item.$2);
+                    Navigator.pop(context);
+                  },
+                  child: SizedBox(
+                    width: 64,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 48,
+                          height: 48,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: color,
+                            border: isSelected
+                                ? Border.all(
+                                    color: colors.textPrimary,
+                                    width: 3,
+                                  )
+                                : Border.all(
+                                    color: colors.divider,
+                                    width: 1.5,
+                                  ),
+                          ),
+                          child: isSelected
+                              ? Icon(
+                                  Icons.check,
+                                  color: color.computeLuminance() > 0.5
+                                      ? Colors.black
+                                      : Colors.white,
+                                  size: 22,
+                                )
+                              : null,
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          context.tr(item.$1),
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: isSelected
+                                ? colors.primary
+                                : colors.textHint,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: AppSpacing.lg),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 // ==================== Playback ====================

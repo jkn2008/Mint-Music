@@ -7,8 +7,10 @@ import '../../../core/theme/app_spacing.dart';
 import '../../../core/theme/theme_provider.dart';
 import '../../../shared/widgets/music_cover_image.dart';
 import '../../../shared/widgets/song_list_item.dart';
+import '../../../shared/widgets/song_selection.dart';
 import '../../player/presentation/mini_player.dart';
 import '../application/search_providers.dart';
+import '../../library/application/playlist_providers.dart';
 import '../domain/models/playlist.dart';
 import '../../player/application/playback_controller.dart';
 import '../../player/domain/models/song.dart';
@@ -32,6 +34,9 @@ class _SearchPageState extends ConsumerState<SearchPage> {
   String _inputText = '';
   Timer? _debounceTimer;
   final _resultsScrollController = ScrollController();
+
+  /// 批量选择控制器（长按搜索结果进入多选模式）。
+  final SongSelectionController _selection = SongSelectionController();
 
   @override
   void initState() {
@@ -93,6 +98,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
     _controller.dispose();
     _focusNode.dispose();
     _resultsScrollController.dispose();
+    _selection.dispose();
     _resetSearchState();
     super.dispose();
   }
@@ -187,6 +193,14 @@ class _SearchPageState extends ConsumerState<SearchPage> {
     });
 
     ref.listen<String>(searchQueryProvider, (previous, next) {
+      // 换了关键词就丢弃旧的选中集合，避免选中「上一批搜索结果」里的歌曲。
+      // 延迟到帧后：监听回调可能在 build 阶段触发，直接通知会触发
+      // "setState() called during build"。
+      if (previous != next && _selection.isActive) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _selection.exit();
+        });
+      }
       if (next.isEmpty) {
         ref.read(searchResultsControllerProvider.notifier).reset();
         ref.read(playlistSearchControllerProvider.notifier).reset();
@@ -233,61 +247,163 @@ class _SearchPageState extends ConsumerState<SearchPage> {
     final searchTab = ref.watch(searchTabProvider);
     final playlistSearchState = ref.watch(playlistSearchControllerProvider);
 
-    return Scaffold(
-      backgroundColor: colors.background,
-      body: Stack(
-        children: [
-          SafeArea(
-            child: Column(
+    return ListenableBuilder(
+      listenable: _selection,
+      builder: (context, _) {
+        final selecting = _selection.isActive;
+        return PopScope(
+          // 多选模式下先拦截返回键用于退出选择
+          canPop: !selecting,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) _selection.exit();
+          },
+          child: Scaffold(
+            backgroundColor: colors.background,
+            body: Stack(
               children: [
-                _buildSearchBar(colors, sources, sourceId),
-                if (_showSuggest)
-                  _buildSearchSuggest(colors)
-                else if (query.isEmpty) ...[
-                  Expanded(
-                    child: hotTagsAsync.when(
-                      data: (hotTags) => ListView(
-                        padding: const EdgeInsets.only(bottom: AppSpacing.xxxl),
-                        children: [
-                          if (searchHistory.isNotEmpty)
-                            _buildSearchHistory(colors, searchHistory),
-                          const SizedBox(height: AppSpacing.lg),
-                          _buildHotTags(colors, hotTags),
-                        ],
-                      ),
-                      loading: () =>
-                          const Center(child: CircularProgressIndicator()),
-                      error: (_, __) => Center(
-                        child: Text(
-                          context.tr('加载失败'),
-                          style: TextStyle(color: colors.textHint),
+                SafeArea(
+                  child: Column(
+                    children: [
+                      _buildSearchBar(colors, sources, sourceId),
+                      if (_showSuggest)
+                        _buildSearchSuggest(colors)
+                      else if (query.isEmpty) ...[
+                        Expanded(
+                          child: hotTagsAsync.when(
+                            data: (hotTags) => ListView(
+                              padding: const EdgeInsets.only(
+                                bottom: AppSpacing.xxxl,
+                              ),
+                              children: [
+                                if (searchHistory.isNotEmpty)
+                                  _buildSearchHistory(colors, searchHistory),
+                                const SizedBox(height: AppSpacing.lg),
+                                _buildHotTags(colors, hotTags),
+                              ],
+                            ),
+                            loading: () => const Center(
+                              child: CircularProgressIndicator(),
+                            ),
+                            error: (_, __) => Center(
+                              child: Text(
+                                context.tr('加载失败'),
+                                style: TextStyle(color: colors.textHint),
+                              ),
+                            ),
+                          ),
                         ),
+                      ] else ...[
+                        // 多选时用选择栏替换标签栏：避免在多选中切换
+                        // 「歌曲 / 歌单」导致选中集合失效。
+                        if (selecting)
+                          SongSelectionBar(
+                            colors: colors,
+                            controller: _selection,
+                            songs: searchState.songs,
+                          )
+                        else
+                          _buildSearchTabBar(colors, searchTab),
+                        // 根据标签页显示对应结果
+                        Expanded(
+                          child: searchTab == SearchTab.songs || selecting
+                              ? _buildSearchResults(colors, searchState)
+                              : _buildPlaylistResults(
+                                  colors,
+                                  playlistSearchState,
+                                ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                // 底部迷你播放器（键盘弹出时隐藏）
+                MediaQuery.of(context).viewInsets.bottom > 0
+                    ? const SizedBox.shrink()
+                    : Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 20,
+                        child: RepaintBoundary(child: const MiniPlayer()),
                       ),
+                if (selecting)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: AppSpacing.miniPlayerHeight + AppSpacing.xl,
+                    child: SongBatchActionBar(
+                      colors: colors,
+                      controller: _selection,
+                      onPlayNext: _batchPlayNext,
+                      onAddToQueue: _batchAddToQueue,
+                      onAddToPlaylist: _batchAddToPlaylist,
+                      onFavorite: _batchFavorite,
+                      onDownload: _batchDownload,
                     ),
                   ),
-                ] else ...[
-                  // 搜索结果标签栏（歌曲 / 歌单）
-                  _buildSearchTabBar(colors, searchTab),
-                  // 根据标签页显示对应结果
-                  Expanded(
-                    child: searchTab == SearchTab.songs
-                        ? _buildSearchResults(colors, searchState)
-                        : _buildPlaylistResults(colors, playlistSearchState),
-                  ),
-                ],
               ],
             ),
           ),
-          // 底部迷你播放器（键盘弹出时隐藏）
-          MediaQuery.of(context).viewInsets.bottom > 0
-              ? const SizedBox.shrink()
-              : Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 20,
-                  child: RepaintBoundary(child: const MiniPlayer()),
-                ),
-        ],
+        );
+      },
+    );
+  }
+
+  // ---------------------------------------------------------------- 批量选择
+
+  /// 长按搜索结果进入批量选择模式并选中该首。
+  void _enterSelection(Song song) {
+    if (_selection.isActive) {
+      _selection.toggle(song.id);
+    } else {
+      _selection.enter(song.id);
+    }
+  }
+
+  List<Song> _selectedSongs() =>
+      _selection.selectedSongs(ref.read(searchResultsControllerProvider).songs);
+
+  void _batchPlayNext() {
+    final selected = _selectedSongs();
+    if (selected.isEmpty) return;
+    ref.read(playbackControllerProvider.notifier).insertNext(selected);
+    _showMessage('已将 ${selected.length} 首插入到下一首播放');
+  }
+
+  void _batchAddToQueue() {
+    final selected = _selectedSongs();
+    if (selected.isEmpty) return;
+    ref.read(playbackControllerProvider.notifier).appendToQueue(selected);
+    _showMessage('已将 ${selected.length} 首加入播放列表');
+  }
+
+  void _batchAddToPlaylist() {
+    final selected = _selectedSongs();
+    if (selected.isEmpty) return;
+    final colors = ref.read(themeColorsProvider);
+    unawaited(showAddSongsToPlaylistSheet(context, ref, colors, selected));
+  }
+
+  void _batchDownload() {
+    final selected = _selectedSongs();
+    if (selected.isEmpty) return;
+    unawaited(showBatchDownloadSheet(context, ref, selected));
+  }
+
+  Future<void> _batchFavorite() async {
+    final selected = _selectedSongs();
+    if (selected.isEmpty) return;
+    await ref
+        .read(playlistsProvider.notifier)
+        .addSongsToPlaylist('__favorites__', selected);
+    if (mounted) _showMessage('已收藏 ${selected.length} 首');
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(context.tr(message)),
+        duration: const Duration(seconds: 2),
       ),
     );
   }
@@ -1022,9 +1138,14 @@ class _SearchPageState extends ConsumerState<SearchPage> {
 
     final songs = state.songs;
     final showLoadingRow = state.isLoadingMore;
+    final selecting = _selection.isActive;
     return ListView.builder(
       controller: _resultsScrollController,
-      padding: const EdgeInsets.only(bottom: AppSpacing.xxxl),
+      // 多选模式下为底部批量操作栏留出空间
+      padding: EdgeInsets.only(
+        bottom: AppSpacing.xxxl +
+            (selecting ? SongBatchActionBar.height : 0),
+      ),
       itemCount: songs.length + (showLoadingRow ? 1 : 0),
       cacheExtent: 360,
       addAutomaticKeepAlives: false,
@@ -1052,6 +1173,11 @@ class _SearchPageState extends ConsumerState<SearchPage> {
           showQuality: true,
           showDuration: true,
           showMenuButton: true,
+          selectionMode: selecting,
+          selected: _selection.isSelected(song.id),
+          onSelectionToggle: (s) => _selection.toggle(s.id),
+          // 长按进入批量选择模式
+          onLongPress: () => _enterSelection(song),
           onPlayTap: () async {
             final now = DateTime.now();
             final lastTap = _globalLastTapTime;

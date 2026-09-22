@@ -26,6 +26,19 @@ class SongListItem extends ConsumerWidget {
   final bool isPlaying;
   final List<String>? supportedQualities;
 
+  /// 是否处于批量选择模式。为 true 时序号列变成勾选框、整行点击切换选中，
+  /// 并隐藏「更多」按钮（避免与选择手势冲突）。
+  final bool selectionMode;
+
+  /// 当前歌曲是否被选中（仅在 [selectionMode] 下生效）。
+  final bool selected;
+
+  /// 选中状态切换回调（整行点击或勾选框点击都会走这里）。
+  final ValueChanged<Song>? onSelectionToggle;
+
+  /// 长按回调：页面通常在这里进入批量选择模式并选中该曲。
+  final VoidCallback? onLongPress;
+
   const SongListItem({
     super.key,
     required this.song,
@@ -41,6 +54,10 @@ class SongListItem extends ConsumerWidget {
     this.onMenuTap,
     this.isPlaying = false,
     this.supportedQualities,
+    this.selectionMode = false,
+    this.selected = false,
+    this.onSelectionToggle,
+    this.onLongPress,
   });
 
   @override
@@ -53,25 +70,55 @@ class SongListItem extends ConsumerWidget {
   }
 
   Widget _buildItem(ThemeColors colors, BuildContext context, WidgetRef ref) {
+    final effectiveTap = selectionMode
+        ? () => onSelectionToggle?.call(song)
+        : (onTap ?? () => _defaultOnTap(context));
     return InkWell(
-      onTap: onTap ?? () => _defaultOnTap(context),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.md,
-          vertical: AppSpacing.sm,
-        ),
-        child: Row(
-          children: [
-            if (showIndex) _buildIndex(colors),
-            if (showCover) ...[
+      onTap: effectiveTap,
+      onLongPress: onLongPress,
+      child: Container(
+        color: selected
+            ? colors.primary.withValues(alpha: 0.08)
+            : Colors.transparent,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md,
+            vertical: AppSpacing.sm,
+          ),
+          child: Row(
+            children: [
+              if (showIndex)
+                selectionMode ? _buildCheckbox(colors) : _buildIndex(colors),
+              if (showCover) ...[
+                const SizedBox(width: AppSpacing.sm),
+                _buildCover(colors, ref),
+              ],
               const SizedBox(width: AppSpacing.sm),
-              _buildCover(colors, ref),
+              Expanded(child: _buildSongInfo(colors, context)),
+              if (showDuration && !selectionMode) _buildDuration(colors),
+              if (showMenuButton && !selectionMode)
+                _buildMenuButton(colors, context),
             ],
-            const SizedBox(width: AppSpacing.sm),
-            Expanded(child: _buildSongInfo(colors, context)),
-            if (showDuration) _buildDuration(colors),
-            if (showMenuButton) _buildMenuButton(colors, context),
-          ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 多选模式下的勾选框。
+  ///
+  /// 用 [IgnorePointer] 包住，让它只负责展示：整行的点击统一由外层 InkWell
+  /// 处理，避免「点勾选框触发两次切换导致状态不变」。
+  Widget _buildCheckbox(ThemeColors colors) {
+    return SizedBox(
+      width: 28,
+      child: IgnorePointer(
+        child: Checkbox(
+          value: selected,
+          onChanged: (_) {},
+          activeColor: colors.primary,
+          visualDensity: VisualDensity.compact,
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
         ),
       ),
     );

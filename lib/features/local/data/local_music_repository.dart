@@ -339,6 +339,37 @@ class LocalMusicRepository {
     return true;
   }
 
+  /// 批量删除本地歌曲，返回实际从索引中移除的数量。
+  ///
+  /// 与逐首调用 [deleteSong] 的区别：索引只写一次。索引是全量 JSON 落盘，
+  /// 批量删除时逐首写盘会让耗时随数量线性放大。
+  Future<int> deleteSongs(Iterable<String> ids) async {
+    await init();
+    final filePaths = <String>[];
+    var removed = 0;
+    for (final id in ids) {
+      final song = _songsMap.remove(id);
+      if (song == null) continue;
+      removed++;
+      final filePath = song.filePath;
+      if (filePath != null && filePath.isNotEmpty) filePaths.add(filePath);
+    }
+    if (removed == 0) return 0;
+
+    await _saveIndex();
+    for (final filePath in filePaths) {
+      try {
+        final file = File(filePath);
+        if (await file.exists()) {
+          await file.delete();
+        }
+      } catch (e) {
+        debugPrint('[LocalMusic] 删除文件失败: $filePath ($e)');
+      }
+    }
+    return removed;
+  }
+
   Song _mergePreferFilled(Song a, Song b) {
     String pick(String? x, String? y, [String fallback = '']) {
       if (x != null && x.isNotEmpty && x != '未知艺术家' && x != '未知曲目' && x != '未知专辑') return x;

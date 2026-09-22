@@ -7,6 +7,7 @@ import '../core/theme/app_theme.dart';
 import '../core/theme/theme_provider.dart';
 import '../core/router/app_router.dart';
 import '../core/utils/responsive_layout.dart';
+import '../features/player/presentation/desktop_lyric_window.dart';
 import '../features/plugin/application/plugin_providers.dart';
 import '../features/settings/application/plugin_providers.dart';
 import '../features/settings/application/settings_providers.dart';
@@ -62,17 +63,25 @@ class _AppState extends ConsumerState<App> {
           final layoutMode = ResponsiveLayout.getLayoutMode(context);
           final isLandscape = ResponsiveLayout.isLandscape(context);
           final isTablet = ResponsiveLayout.isTablet(context);
-          return ResponsiveWrapper(
-            deviceType: deviceType,
-            layoutMode: layoutMode,
-            isLandscape: isLandscape,
-            isTablet: isTablet,
-            child: MediaQuery(
-              data: MediaQuery.of(context).copyWith(
-                textScaler: MediaQuery.of(context).textScaler,
+          // 桌面歌词层与路由内容同级,因此会悬浮在所有页面/弹窗之上。
+          // StackFit.passthrough 保证 Navigator 依旧拿到铺满屏幕的紧约束。
+          return Stack(
+            fit: StackFit.passthrough,
+            children: [
+              ResponsiveWrapper(
+                deviceType: deviceType,
+                layoutMode: layoutMode,
+                isLandscape: isLandscape,
+                isTablet: isTablet,
+                child: MediaQuery(
+                  data: MediaQuery.of(context).copyWith(
+                    textScaler: MediaQuery.of(context).textScaler,
+                  ),
+                  child: child ?? const SizedBox.shrink(),
+                ),
               ),
-              child: child ?? const SizedBox.shrink(),
-            ),
+              const DesktopLyricLayer(),
+            ],
           );
         },
       ),

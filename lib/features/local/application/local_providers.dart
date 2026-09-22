@@ -223,6 +223,22 @@ class LocalMusicNotifier extends StateNotifier<AsyncValue<List<Song>>> {
     }
   }
 
+  /// 批量删除本地歌曲。返回实际移除的数量。
+  Future<int> deleteSongs(List<Song> songs) async {
+    if (songs.isEmpty) return 0;
+    try {
+      final repo = _ref.read(localMusicRepositoryProvider);
+      final removed = await repo.deleteSongs(songs.map((s) => s.id));
+      if (removed > 0) {
+        state = AsyncValue.data(repo.getLocalSongs());
+      }
+      return removed;
+    } catch (e, st) {
+      state = AsyncValue.error(e, st);
+      return 0;
+    }
+  }
+
   void refresh() {
     _init();
   }
