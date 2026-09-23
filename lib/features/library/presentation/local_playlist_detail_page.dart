@@ -10,6 +10,7 @@ import 'package:share_plus/share_plus.dart';
 import '../../../core/l10n/l10n.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/theme/theme_provider.dart';
+import '../../../core/utils/scroll_locate.dart';
 import '../../../shared/services/playlist_cmpl_codec.dart';
 import '../../../shared/widgets/share_preview_dialog.dart';
 import '../../../shared/widgets/music_cover_image.dart';
@@ -951,6 +952,8 @@ class _LocalPlaylistDetailPageState
                 (selecting ? SongBatchActionBar.height : 0),
           ),
           itemCount: _sortedSongs.length,
+      // 与定位用的行高常量一致，避免估算误差累积
+      itemExtent: SongListItem.itemExtent,
       addAutomaticKeepAlives: false,
       addRepaintBoundaries: true,
       itemBuilder: (context, index) {
@@ -1045,13 +1048,12 @@ class _LocalPlaylistDetailPageState
     if (index == -1) return;
     if (!_scrollController.hasClients) return;
 
-    const itemHeight = SongListItem.itemExtent;
-    final target = index * itemHeight;
-    final maxExtent = _scrollController.position.maxScrollExtent;
-    _scrollController.animateTo(
-      target.clamp(0.0, maxExtent),
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic,
+    unawaited(
+      scrollToItemIndex(
+        _scrollController,
+        index: index,
+        itemExtent: SongListItem.itemExtent,
+      ),
     );
   }
 

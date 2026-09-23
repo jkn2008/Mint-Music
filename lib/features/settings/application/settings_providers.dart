@@ -229,7 +229,7 @@ final fullScreenBackgroundModeProvider =
 
 // -- app version (loaded once) --
 final appVersionProvider = FutureProvider<String>((ref) async {
-  return '1.0.7';
+  return '1.0.8';
 });
 
 class EqPreset {

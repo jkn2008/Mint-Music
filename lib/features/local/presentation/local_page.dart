@@ -9,6 +9,7 @@ import '../../../core/l10n/l10n.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/theme/theme_provider.dart';
 import '../../../core/utils/responsive_layout.dart';
+import '../../../core/utils/scroll_locate.dart';
 import '../../../core/constants/app_routes.dart';
 import '../../../shared/widgets/song_action_sheet.dart';
 import '../../../shared/widgets/music_cover_image.dart';
@@ -107,14 +108,13 @@ class _LocalPageState extends ConsumerState<LocalPage> {
     final index = songs.indexWhere((s) => s.id == currentSong.id);
     if (index == -1) return;
 
-    final itemHeight = 66.0;
-    // 稍微往上预留一点空间，防止歌曲行被迷你播放器遮挡显示不全
-    final target = (index * itemHeight) - 8.0;
-    final maxExtent = _scrollController.position.maxScrollExtent;
-    _scrollController.animateTo(
-      target.clamp(0.0, maxExtent),
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic,
+    unawaited(
+      scrollToItemIndex(
+        _scrollController,
+        index: index,
+        // 行高 + 分隔间距
+        itemExtent: _LocalSongItem.itemExtent + _LocalSongItem.separatorExtent,
+      ),
     );
   }
 
@@ -396,7 +396,8 @@ class _LocalPageState extends ConsumerState<LocalPage> {
                 (selecting ? SongBatchActionBar.height : 0),
           ),
           itemCount: songs.length,
-          separatorBuilder: (_, __) => const SizedBox(height: 2),
+          separatorBuilder: (_, __) =>
+              const SizedBox(height: _LocalSongItem.separatorExtent),
           itemBuilder: (context, index) {
             final song = songs[index];
             return _LocalSongItem(
@@ -1568,6 +1569,16 @@ class _LocalSongItem extends ConsumerWidget {
     this.onLongPress,
   });
 
+  /// 单行高度（48 封面 + 上下各 8 内边距）。
+  ///
+  /// 行高由内容决定，这里用 SizedBox 固定住，保证定位时用的行高常量与真实
+  /// 行高完全一致 —— 否则每一行几像素的误差到第 85 行就会放大成几百像素，
+  /// 目标会滚出可视区。
+  static const double itemExtent = 64.0;
+
+  /// 列表分隔间距（ListView.separated）。
+  static const double separatorExtent = 2.0;
+
   final Song song;
   final int index;
   final void Function(Song song) onPlay;
@@ -1585,7 +1596,10 @@ class _LocalSongItem extends ConsumerWidget {
     final playingId = ref.watch(playbackControllerProvider.select((s) => s.currentSong?.id));
     final isPlaying = playingId == song.id;
 
-    return GestureDetector(
+    return SizedBox(
+      // 固定行高，保证 itemExtent 与实际布局一致
+      height: itemExtent,
+      child: GestureDetector(
       onTap: selectionMode ? () => onSelectionToggle?.call(song) : () => onPlay(song),
       onLongPress: selectionMode ? null : onLongPress,
       child: Container(
@@ -1716,6 +1730,7 @@ class _LocalSongItem extends ConsumerWidget {
             ],
           ],
         ),
+      ),
       ),
     );
   }

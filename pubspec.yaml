@@ -1,7 +1,7 @@
 name: mintmusic
 description: "薄荷音乐 - A Flutter music player replicating CeruMusic for Android"
 publish_to: 'none'
-version: 1.0.7+7
+version: 1.0.8+8
 
 environment:
   sdk: ^3.11.4

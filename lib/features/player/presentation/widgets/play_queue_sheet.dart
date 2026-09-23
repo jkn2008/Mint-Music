@@ -1,10 +1,21 @@
 import 'package:flutter/material.dart';
 
+import 'dart:async';
+
 import '../../../../core/l10n/l10n.dart';
 import '../../../../core/theme/app_colors.dart';
+import '../../../../core/utils/scroll_locate.dart';
 import '../../../../shared/widgets/music_cover_image.dart';
 import '../../application/playback_controller.dart';
 import '../../domain/models/playback_state.dart';
+
+/// 播放队列单行高度。
+///
+/// 队列行是「带 leading + 双行（title/subtitle）」的 ListTile，Material 3 下
+/// 高度为 72。之前这里写成 64，每行差 8px，定位到第 85 首时累计偏差 680px，
+/// 目标会整个滚出可视区。同时把这个值交给 ListView 的 [itemExtent]，
+/// 让"估算行高"与"真实行高"由同一个常量保证一致。
+const double _kQueueItemExtent = 72.0;
 
 /// 播放队列底部弹层（与全屏播放页中的播放队列完全一致）。
 ///
@@ -63,13 +74,12 @@ class _PlayQueueSheetContentState extends State<_PlayQueueSheetContent> {
     }
     if (!_listScrollController.hasClients) return;
 
-    const itemHeight = 64.0;
-    final target = (widget.currentIndex * itemHeight) - 40.0;
-    final maxExtent = _listScrollController.position.maxScrollExtent;
-    _listScrollController.animateTo(
-      target.clamp(0.0, maxExtent),
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic,
+    unawaited(
+      scrollToItemIndex(
+        _listScrollController,
+        index: widget.currentIndex,
+        itemExtent: _kQueueItemExtent,
+      ),
     );
   }
 
@@ -143,6 +153,10 @@ class _PlayQueueSheetContentState extends State<_PlayQueueSheetContent> {
                       child: ListView.builder(
                         controller: _listScrollController,
                         itemCount: widget.queue.length,
+                        // 与定位用的行高常量一致，避免估算行高累积误差
+                        itemExtent: _kQueueItemExtent,
+                        addAutomaticKeepAlives: false,
+                        addRepaintBoundaries: true,
                         itemBuilder: (context, index) {
                           final queueSong = widget.queue[index];
                           final isCurrent = index == widget.currentIndex;

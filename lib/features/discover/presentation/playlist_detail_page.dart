@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../../core/l10n/l10n.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/theme/theme_provider.dart';
+import '../../../core/utils/scroll_locate.dart';
 import '../../../shared/widgets/music_cover_image.dart';
 import '../../../shared/widgets/song_action_sheet.dart';
 import '../../../shared/widgets/song_list_item.dart';
@@ -418,6 +419,9 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
             (selecting ? SongBatchActionBar.height : 0),
       ),
       itemCount: songs.length,
+      // 与定位用的行高常量一致：既避免估算误差累积，也让列表布局从
+      // "逐个测量子项"退化成 O(1) 的固定行高布局，长列表滚动更流畅。
+      itemExtent: SongListItem.itemExtent,
       addAutomaticKeepAlives: false,
       addRepaintBoundaries: true,
       itemBuilder: (context, index) {
@@ -482,14 +486,12 @@ class _PlaylistDetailPageState extends ConsumerState<PlaylistDetailPage> {
   void _locateCurrentSong(int currentIndex) {
     if (!_scrollController.hasClients) return;
 
-    const itemHeight = SongListItem.itemExtent;
-    // 稍微往上预留一点空间，防止歌曲行被迷你播放器遮挡显示不全
-    final target = (currentIndex * itemHeight) - 8.0;
-    final maxExtent = _scrollController.position.maxScrollExtent;
-    _scrollController.animateTo(
-      target.clamp(0.0, maxExtent),
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic,
+    unawaited(
+      scrollToItemIndex(
+        _scrollController,
+        index: currentIndex,
+        itemExtent: SongListItem.itemExtent,
+      ),
     );
   }
 
